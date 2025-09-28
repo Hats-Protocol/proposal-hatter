@@ -263,7 +263,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Emits both the payout destination and caller for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
 
-Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment)`, passing `safe` from storage, `paymentToken = address(0)`, and `payment = 0`. ETH is represented by `token == address(0)`.
+Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`, passing `safe` from storage, `paymentToken = address(0)`, `payment = 0`, `delegate = address(this)`, and `signature = ""` (empty bytes). ETH is represented by `token == address(0)`. The module treats an empty signature as authorization by `msg.sender`, so Proposal Hatter must be configured as the delegate for the Safe in the AllowanceModule.
 
 ---
 
@@ -347,7 +347,7 @@ event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, u
 One‑time setup (DAO owners on the Safe):
 
 1) Enable the AllowanceModule on the Safe (UI or programmatically).
-2) Add spending limits for Proposal Hatter:
+2) Add Proposal Hatter as a delegate and set spending limits for it:
    - For each asset (ETH and specific ERC‑20s), set a limit (one‑time or periodic) large enough for near‑term operations.
    - Automate top‑ups as part of DAO ops cadence if desired.
 3) (Optional) Attach Zodiac Roles Modifier to the Safe to further constrain which modules/selectors are callable.
@@ -367,8 +367,8 @@ Audits / Lindy:
 
 - Two layers of limit: Proposal Hatter’s governance‑canonical ledger + Safe’s module limit. Either can stop a withdrawal; both must allow it.
 - Compromise model: If Proposal Hatter is compromised, module limits cap outflows; keep them “as low as practical” and top‑up operationally.
-- Reentrancy: Guard `execute` and `withdraw` (`nonReentrant`, CEI).
-- External calls: Only two: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) AllowanceModule in `withdraw` via `executeAllowanceTransfer`. Revert on failure.
+- Reentrancy: Guard `execute` and `withdraw` using OpenZeppelin `ReentrancyGuard` (`nonReentrant`, CEI).
+- External calls: Only two: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) AllowanceModule in `withdraw` via `executeAllowanceTransfer`. Revert on failure. For AllowanceModule, an empty signature uses `msg.sender` as signer; ensure Proposal Hatter is the configured delegate.
 - Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol, pause Proposal Hatter (`setPauses`), or reduce/disable the Safe’s module limits to freeze payouts immediately.
 
 ---
@@ -475,8 +475,23 @@ function withdraw(uint256 recipientHatId, address token, uint256 amount, address
   allowanceRemaining[recipientHatId][token] = rem - amount;
 
   // interactions: call AllowanceModule to move funds from Safe to `to`
-  // Signature: executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment)
-  AllowanceModule(allowanceModule).executeAllowanceTransfer(safe, token, to, uint96(amount), address(0), 0);
+  // Signature: executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)
+  // Use delegate = address(this) and signature = empty bytes to authorize as the configured delegate
+  try AllowanceModule(allowanceModule).executeAllowanceTransfer(
+    safe,
+    token,
+    to,
+    uint96(amount),
+    address(0),
+    0,
+    address(this),
+    bytes("")
+  ) {
+    // ok
+  } catch {
+    allowanceRemaining[recipientHatId][token] = rem;
+    revert ModuleCallFailed();
+  }
 
   emit AllowanceConsumed(recipientHatId, token, amount, rem - amount);
 }
@@ -520,7 +535,7 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external 
 // - Emits SafeAndModuleUpdated and RoleHatsUpdated
 ```
 
-> Module call signature fixed in this spec: `executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment)`.
+> Module call signature fixed in this spec: `executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`.
 
 ---
 
