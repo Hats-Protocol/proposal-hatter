@@ -7,10 +7,13 @@ optimizer_runs = 1_000_000
 bytecode_hash = "none"
 gas_reports = []
 auto_detect_solc = false
-solc = "0.8.28"
+solc = "0.8.30"
 remappings = [
   "ds-test/=lib/forge-std/lib/ds-test/src/",
   "forge-std/=lib/forge-std/src/",
+  "hats-protocol/=lib/hats-protocol/src/",
+  "safe-modules/=lib/safe-modules/",
+  "openzeppelin-contracts/=lib/openzeppelin-contracts/",
 ]
 # Enable tests to read ir-optimized bytecode precompiled by profile.optimized
 fs_permissions = [{ access = "read", path = "./optimized-out" }]
