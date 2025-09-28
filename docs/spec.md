@@ -81,6 +81,7 @@ Notes:
 - Per-salt de‑duplication: `proposalId` excludes `submitter` but includes `salt`. Proposing identical inputs with the same salt yields the same `proposalId` and must be unused; changing the salt creates a new `proposalId` for an otherwise identical payload.
 - `salt` is optional (e.g., `0x00`) and is emitted for provenance.
 - Full `hatsMulticall` calldata is persisted alongside each proposal for first-party UIs; integrity checks compare supplied calldata to the stored bytes.
+- Helper: `computeProposalId(...)` (see Interface) mirrors this hashing logic on-chain for UI/explorer consumption.
 
 ### 3.2 Storage
 
@@ -162,6 +163,14 @@ function withdraw(
 ) external;  // caller must wear recipientHatId
 
 function allowanceOf(uint256 hatId, address token) external view returns (uint256);
+function computeProposalId(
+  bytes calldata hatsMulticall,
+  uint256 recipientHatId,
+  address fundingToken,
+  uint256 fundingAmount,
+  uint64 timelockSec,
+  bytes32 salt
+) external view returns (bytes32);
 
 // ---- Admin (Owner Hat) ----
 function setSafeAndModule(address safe_, address allowanceModule_) external;
@@ -182,12 +191,13 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external;
 - Computes `proposalId` (per-salt de‑dup) and requires it is unused.
 - Stores `ProposalData{ submitter=msg.sender, eta=0, timelockSec, state=ProposalState.Active, hatsMulticall, recipientHatId, fundingToken, fundingAmount }`.
 - Event (indexed): `Proposed(proposalId, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, salt)`.
+- Note: UIs may invoke `computeProposalId` pre-call to verify or display the ID that will be emitted.
 
 ### 5.2 approveAndQueue(proposalId) — Approver Hat
 
 - Requires current `state == ProposalState.Active`.
 - Sets `eta = now + timelockSec`; sets `state = ProposalState.Succeeded` (proposal succeeded and awaits ETA).
-- Event: `Succeeded(proposalId, eta)`.
+- Event: `Succeeded(proposalId, msg.sender, eta)`.
 
 ### 5.3 execute(proposalId) — Public / Executor Hat optional
 
@@ -200,7 +210,7 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external;
 - On success:
   - Increase Proposal Hatter’s internal ledger: `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
   - Set state `ProposalState.Executed`.
-  - Events: `Executed(proposalId)` and `FundingApproved(recipientHatId, fundingToken, fundingAmount)`.
+  - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])` and `FundingApproved(recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
 
 ### 5.4 approveAndExecute(...) — Proposer + Approver Hats
@@ -215,7 +225,7 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external;
 
 - Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Succeeded`} and before execution.
 - Sets state `ProposalState.Escalated`.
-- Event: `Escalated(proposalId)`.
+- Event: `Escalated(proposalId, msg.sender)`.
 - Effect: An `Escalated` proposal cannot be executed by Proposal Hatter; the DAO may proceed via its own governance paths outside Proposal Hatter if desired.
 
 ### 5.6 cancel(proposalId) — submitter or Owner Hat
@@ -240,7 +250,8 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external;
   - ETH: `token == address(0)`.
   - ERC‑20: `token` is the token address.
 - Revert on any module error; if revert, restore the internal allowance to its previous value.
-- Event: `AllowanceConsumed(recipientHatId, token, amount, remaining)`.
+- Event: `AllowanceConsumed(recipientHatId, token, amount, remaining, to, msg.sender)`.
+- Emits both the payout destination and caller for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
 
 Module call note: The canonical method in the Safe modules repo is `AllowanceModule.executeAllowanceTransfer(...)`. Exact parameters and ETH sentinel conventions vary by version; follow the module in use. If using `executeAllowanceTransfer`, ETH is typically represented with `address(0)` and a payment of `0`.
@@ -254,15 +265,33 @@ event Proposed(bytes32 indexed proposalId, address indexed submitter,
                uint256 indexed recipientHatId, address fundingToken,
                uint256 fundingAmount, uint64 timelockSec, bytes32 salt);
 
-event Succeeded(bytes32 indexed proposalId, uint64 indexed eta);
-event Executed(bytes32 indexed proposalId);
+event Succeeded(bytes32 indexed proposalId, address indexed by, uint64 eta);
+event Executed(
+  bytes32 indexed proposalId,
+  uint256 indexed recipientHatId,
+  address indexed fundingToken,
+  uint256 fundingAmount,
+  uint256 allowanceRemaining
+);
 
-event Escalated(bytes32 indexed proposalId);
+event Escalated(bytes32 indexed proposalId, address indexed by);
 event Canceled(bytes32 indexed proposalId, address indexed by);
 event Defeated(bytes32 indexed proposalId, address indexed by);
 
-event FundingApproved(uint256 indexed recipientHatId, address indexed fundingToken, uint256 amount);
-event AllowanceConsumed(uint256 indexed recipientHatId, address indexed token, uint256 amount, uint256 remaining);
+event FundingApproved(
+  uint256 indexed recipientHatId,
+  address indexed fundingToken,
+  uint256 amount,
+  uint256 allowanceRemaining
+);
+event AllowanceConsumed(
+  uint256 indexed recipientHatId,
+  address indexed token,
+  uint256 amount,
+  uint256 remaining,
+  address indexed to,
+  address by
+);
 
 event SafeAndModuleUpdated(address indexed safe, address indexed allowanceModule);
 event RoleHatsUpdated(uint256 indexed ownerHatId, uint256 indexed proposerHatId,
