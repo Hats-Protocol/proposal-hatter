@@ -14,7 +14,9 @@ Scope: Single contract (ProposalHatter.sol). No proxy/upgradability assumed unle
 
 ## 0) Purpose & Summary
 
-We want decider trust zones to approve exactly-specified Hats changes and bounded funding, without giving the decider custody of funds or access controls. Proposals hash‑commit the precise Hats multicall bytes and the funding allowance for a Recipient Hat. After an optional timelock, anyone (or an address wearing an Executor Hat, if set) can execute the proposal. Funding is pull‑based: a Recipient Hat wearer calls Proposal Hatter, which (a) verifies entitlement and internal allowance, then (b) instructs the Safe AllowanceModule to transfer ETH/ERC‑20 from the DAO’s vault to the recipient.
+We want decider trust zones to approve exactly-specified Hats changes and bounded funding, without giving the decider custody of funds or access controls. Proposals hash‑commit the precise Hats `multicall` bytes and the funding allowance for a Recipient Hat. After an optional timelock, anyone (or an address wearing an Executor Hat, if set) can execute the proposal. Funding is pull‑based: a Recipient Hat wearer calls Proposal Hatter, which (a) verifies entitlement and internal allowance, then (b) instructs the Safe AllowanceModule to transfer ETH/ERC‑20 from the DAO’s vault to the recipient.
+
+Funding‑only proposals are supported: if a proposal’s `hatsMulticall` bytes are empty, it still must be executed to activate the internal allowance and enable withdrawals. In that case, the contract skips calling Hats Protocol and only applies the funding effects.
 
 This spec is for a minimal version of this concept that, if successful, will be updated in future iterations. This version should minimize complexity and focus on the core functionality, with regards to both implementation of the contract and to make user interfaces as simple and cheap to implement as possible.
 
@@ -29,6 +31,12 @@ This spec is for a minimal version of this concept that, if successful, will be 
 Operational note: The DAO must configure Proposal Hatter with adequate per‑asset limits in the Safe’s AllowanceModule, at least as large as the expected aggregate withdrawals between top‑ups. Limits can be periodic or one‑time; owners can adjust them as needed via the Safe UI/API.
 
 ETH sentinel: `address(0)` denotes native ETH in all references below.
+
+Constructor wiring:
+
+- `HATS_PROTOCOL_ADDRESS` is immutable and set at deploy.
+- `safe` (the DAO Safe) and `allowanceModule` addresses are set in the constructor (and may be updated later by Owner Hat via `setSafeAndModule`).
+- All role hat IDs (`ownerHatId`, `proposerHatId`, `approverHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor (and may be updated later by Owner Hat via `setRoleHats`).
 
 ---
 
@@ -165,7 +173,6 @@ function withdraw(
 ) external;  // caller must wear recipientHatId
 
 function allowanceOf(uint256 hatId, address token) external view returns (uint88);
-function getTotalAllowances(uint256 hatId) external view returns (address[] memory tokens, uint88[] memory amounts);
 function computeProposalId(
   bytes calldata hatsMulticall,
   uint256 recipientHatId,
@@ -190,7 +197,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 ### 5.1 propose(...) — Proposer Hat
 
 - Requires `isWearerOfHat(msg.sender, proposerHatId)`.
-- Requires `hatsMulticall.length > 0`.
+- Allows `hatsMulticall.length == 0` for funding‑only proposals.
 - Computes `proposalId` (per-salt de‑dup) and requires it is unused.
 - Stores `ProposalData{ submitter=msg.sender, eta=0, timelockSec, state=ProposalState.Active, recipientHatId, fundingToken, fundingAmount, hatsMulticall }`.
 - Event (indexed): `Proposed(proposalId, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, salt)`.
@@ -208,7 +215,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Requires `state == ProposalState.Succeeded` and `now >= eta`.
 - Requires not previously `Escalated`, `Canceled`, or `Defeated` (state-machine: only `ProposalState.Succeeded` may proceed).
 - If `executorHatId != 0`, caller must wear Executor Hat.
-- Performs IHats.multicall() call to `HATS_PROTOCOL_ADDRESS` with the stored `p.hatsMulticall` bytes (revert on failure).
+- If `p.hatsMulticall.length > 0`, performs `IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall)` (revert on failure). If `p.hatsMulticall.length == 0`, skip the Hats call (funding‑only proposal).
 - On success:
   - Increase Proposal Hatter's internal ledger with overflow protection: check that `allowanceRemaining[recipientHatId][fundingToken] + fundingAmount` does not overflow, then `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
   - Set state `ProposalState.Executed`.
@@ -256,7 +263,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Emits both the payout destination and caller for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
 
-Module call note: The canonical method in the Safe modules repo is `AllowanceModule.executeAllowanceTransfer(...)`. Exact parameters and ETH sentinel conventions vary by version; follow the module in use. If using `executeAllowanceTransfer`, ETH is typically represented with `address(0)` and a payment of `0`.
+Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment)`, passing `safe` from storage, `paymentToken = address(0)`, and `payment = 0`. ETH is represented by `token == address(0)`.
 
 ---
 
@@ -265,7 +272,7 @@ Module call note: The canonical method in the Safe modules repo is `AllowanceMod
 ```solidity
 event Proposed(bytes32 indexed proposalId, address indexed submitter,
                uint256 indexed recipientHatId, address fundingToken,
-               uint256 fundingAmount, uint64 timelockSec, bytes32 salt);
+               uint256 fundingAmount, uint32 timelockSec, bytes32 salt);
 
 event Succeeded(bytes32 indexed proposalId, address indexed by, uint64 eta);
 event Executed(
@@ -307,14 +314,14 @@ event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, u
 
 ## 7) Invariants
 
-- Exact‑bytes execution: only the stored `hatsMulticall` bytes can be executed.
+- Exact‑bytes execution: only the stored `hatsMulticall` bytes can be executed when present. Funding‑only proposals (empty `hatsMulticall`) execute without a Hats call.
 - Atomicity: if the Hats call fails, nothing changes (no funding approval).
 - Spend monotonicity and authority:
   - `allowanceRemaining` increases only via successful `execute` or via Owner admin `setAllowance`/`decreaseAllowance`.
   - `allowanceRemaining` decreases only via `withdraw` or Owner admin `decreaseAllowance`/`setAllowance`.
   - Maximum allowance per hat is `type(uint88).max` for storage optimization while maintaining sufficient range.
 - Treasury custody: committee has no access; Proposal Hatter is the only actor orchestrating transfers via the Safe's AllowanceModule within owner‑set module limits.
-- Replay safety: `proposalId` binds chain, this contract, Hats core target, payload bytes, recipient hat, token, amount, timelock, and salt. Identical inputs with the same salt are deduped; choosing a new salt permits a fresh proposal for the same payload.
+- Replay safety: `proposalId` binds chain, this contract, Hats Protocol target, payload bytes, recipient hat, token, amount, timelock, and salt. Identical inputs with the same salt are deduped; choosing a new salt permits a fresh proposal for the same payload.
 - State machine: No execution if state ∈ {`ProposalState.Escalated`, `ProposalState.Canceled`, `ProposalState.Defeated`, `ProposalState.Executed`}.
 
 ---
@@ -361,8 +368,8 @@ Audits / Lindy:
 - Two layers of limit: Proposal Hatter’s governance‑canonical ledger + Safe’s module limit. Either can stop a withdrawal; both must allow it.
 - Compromise model: If Proposal Hatter is compromised, module limits cap outflows; keep them “as low as practical” and top‑up operationally.
 - Reentrancy: Guard `execute` and `withdraw` (`nonReentrant`, CEI).
-- External calls: Only two: (a) Hats Core in `execute`, (b) AllowanceModule in `withdraw`. Revert on failure.
-- Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Core, pause Proposal Hatter (`setPauses`), or reduce/disable the Safe’s module limits to freeze payouts immediately.
+- External calls: Only two: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) AllowanceModule in `withdraw` via `executeAllowanceTransfer`. Revert on failure.
+- Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol, pause Proposal Hatter (`setPauses`), or reduce/disable the Safe’s module limits to freeze payouts immediately.
 
 ---
 
@@ -376,8 +383,8 @@ Lifecycle
 
 Calldata integrity
 
-- Allow zero-length `hatsMulticall` at `propose` to support funding-only proposals.
-- Stored `hatsMulticall` cleared/missing before `execute` → revert.
+- Allow zero-length `hatsMulticall` at `propose` to support funding-only proposals; `execute` must succeed and skip the Hats call.
+- For proposals with a non-empty `hatsMulticall`, if the stored bytes are cleared/missing before `execute`, revert.
 - Reading proposal data returns the exact stored `hatsMulticall` bytes.
 
 Escalation / Cancel / Defeat
@@ -428,7 +435,7 @@ function propose(...) external returns (bytes32 id) {
     fundingToken: fundingToken,
     fundingAmount: fundingAmount
   });
-  emit Proposed(id, msg.sender, recipientHatId, fundingToken, fundingAmount, timelockSec, salt);
+  emit Proposed(id, msg.sender, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt);
 }
 
 function execute(bytes32 id) external nonReentrant {
@@ -437,11 +444,10 @@ function execute(bytes32 id) external nonReentrant {
   if (p.state != ProposalState.Succeeded) revert InvalidState(p.state);
   if (block.timestamp < p.eta) revert TooEarly(uint64(p.eta), uint64(block.timestamp));
   if (executorHatId != 0 && !Hats.isWearerOfHat(msg.sender, executorHatId)) revert NotHatWearer(executorHatId);
-  if (p.hatsMulticall.length == 0) revert();
-
   // interactions
-  (bool ok, ) = HATS_PROTOCOL_ADDRESS.call(p.hatsMulticall);
-  if (!ok) revert();
+  if (p.hatsMulticall.length > 0) {
+    IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall);
+  }
 
   // effects
   uint256 currentAllowance = allowanceRemaining[p.recipientHatId][p.fundingToken];
@@ -469,23 +475,8 @@ function withdraw(uint256 recipientHatId, address token, uint256 amount, address
   allowanceRemaining[recipientHatId][token] = rem - amount;
 
   // interactions: call AllowanceModule to move funds from Safe to `to`
-  // Canonical method name in Safe modules: AllowanceModule.executeAllowanceTransfer(...)
-  (bool ok, ) = allowanceModule.call(
-    abi.encodeWithSignature(
-          "executeAllowanceTransfer(address,address,uint96,address,uint96,address,bytes)",
-      token,         // use address(0) for ETH per module
-      to,
-      uint96(amount),
-      address(0),    // paymentToken (none)
-      uint96(0),     // payment (0)
-      address(this), // delegate (ProposalHatter)
-      bytes("")      // signature if required by the module version
-    )
-  );
-  if (!ok) {
-    allowanceRemaining[recipientHatId][token] = rem;
-    revert ModuleCallFailed();
-  }
+  // Signature: executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment)
+  AllowanceModule(allowanceModule).executeAllowanceTransfer(safe, token, to, uint96(amount), address(0), 0);
 
   emit AllowanceConsumed(recipientHatId, token, amount, rem - amount);
 }
@@ -511,9 +502,25 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external 
   allowanceRemaining[hatId][token] = newAmount;
   emit AllowanceAdjusted(hatId, token, oldAmt, newAmount);
 }
+
+// Constructor (summary)
+// constructor(
+//   address hatsProtocol,
+//   address safe_,
+//   address allowanceModule_,
+//   uint256 owner,
+//   uint256 proposer,
+//   uint256 approver,
+//   uint256 executor,
+//   uint256 escalator
+// ) { ... }
+// - Sets immutable HATS_PROTOCOL_ADDRESS = hatsProtocol
+// - Sets safe = safe_ and allowanceModule = allowanceModule_
+// - Sets role hat IDs to the provided values
+// - Emits SafeAndModuleUpdated and RoleHatsUpdated
 ```
 
-> Exact module parameters/signature may differ by deployment. Use the version deployed with your Safe; the canonical contract name in the Safe modules repository is `AllowanceModule`.
+> Module call signature fixed in this spec: `executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment)`.
 
 ---
 
