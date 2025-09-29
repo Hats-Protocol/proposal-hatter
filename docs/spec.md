@@ -1,8 +1,8 @@
 # ProposalHatter.sol — Functional Specification
 
-Status: Draft v1.2
+Status: Draft v1.3
 
-Date: 2025-09-27
+Date: 2025-09-29
 
 Author: Spencer
 
@@ -71,12 +71,13 @@ Inputs defining a proposal:
 Deterministic IDs (global de‑duplication):
 
 ```
+hatsMulticallHash = keccak256(hatsMulticall);
 proposalId = keccak256(
   abi.encode(
     block.chainid,
     address(this),
     HATS_PROTOCOL_ADDRESS,
-    hatsMulticall,
+    hatsMulticallHash,
     recipientHatId,
     fundingToken,
     fundingAmount,
@@ -91,7 +92,7 @@ Notes:
 - Per-salt de‑duplication: `proposalId` excludes `submitter` but includes `salt`. Proposing identical inputs with the same salt yields the same `proposalId` and must be unused; changing the salt creates a new `proposalId` for an otherwise identical payload.
 - `salt` is optional (e.g., `0x00`) and is emitted for provenance.
 - Full `hatsMulticall` calldata is persisted alongside each proposal for first-party UIs; integrity checks compare supplied calldata to the stored bytes.
-- Helper: `computeProposalId(...)` (see Interface) mirrors this hashing logic on-chain for UI/explorer consumption.
+- Helper: `computeProposalId(...)` (see Interface) mirrors this hashing logic on-chain for UI/explorer consumption. Implementations may pre-hash `hatsMulticall` for efficiency; the canonical definition binds the hash of `hatsMulticall`.
 
 ### 3.2 Storage
 
@@ -165,7 +166,6 @@ function withdraw(
   uint256 recipientHatId,
   address token,
   uint88  amount,  // optimized for storage packing
-  address to
 ) external;  // caller must wear recipientHatId
 
 function allowanceOf(uint256 hatId, address token) external view returns (uint88);
@@ -295,8 +295,7 @@ event AllowanceConsumed(
   address indexed token,
   uint256 amount,
   uint256 remaining,
-  address indexed to,
-  address by
+  address indexed to
 );
 
 event SafeAndModuleUpdated(address indexed safe, address indexed allowanceModule);
@@ -419,8 +418,9 @@ Admin adjustments
 ```solidity
 function propose(...) external returns (bytes32 id) {
   if (!Hats.isWearerOfHat(msg.sender, proposerHatId)) revert NotHatWearer(proposerHatId);
+  bytes32 hatsHash = keccak256(hatsMulticall);
   id = keccak256(abi.encode(block.chainid, address(this), HATS_PROTOCOL_ADDRESS,
-                            hatsMulticall, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt));
+                            hatsHash, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt));
   if (proposals[id].state != ProposalState.None) revert AlreadyUsed(id);
   proposals[id] = ProposalData({
     submitter: msg.sender,
