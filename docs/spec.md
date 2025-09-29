@@ -215,7 +215,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - On success:
   - Increase Proposal Hatter's internal ledger with overflow protection: check that `allowanceRemaining[recipientHatId][fundingToken] + fundingAmount` does not overflow, then `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
   - Set state `ProposalState.Executed`.
-  - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])` and `FundingApproved(recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
+  - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
 
 ### 5.4 approveAndExecute(proposalId) — Approver Hat (+ Executor Hat if set)
@@ -225,7 +225,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - If `executorHatId != PUBLIC_SENTINEL`, caller must also wear the Executor Hat.
 - Requires current `state == ProposalState.Active` and stored `timelockSec == 0`.
 - Sets `eta = now`, sets `state = ProposalState.Succeeded`, emits `Succeeded`, then runs `execute(proposalId)`.
-- Emits `Succeeded`, `Executed`, and `FundingApproved` (no `Proposed`, since the proposal already exists).
+- Emits `Succeeded` and`Executed` (no `Proposed`, since the proposal already exists).
 
 ### 5.5 escalate(proposalId) — Escalator Hat
 
@@ -328,7 +328,6 @@ event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, u
 - `error InvalidState(ProposalState current);`
 - `error TooEarly(uint64 eta, uint64 nowTs);`
 - `error AllowanceExceeded(uint256 remaining, uint256 requested);`
-- `error AllowanceOverflow();`
 - `error ModuleCallFailed();`
 - `error AlreadyUsed(bytes32 proposalId);`
 - `error NotSubmitterOrOwner();`
@@ -447,16 +446,14 @@ function execute(bytes32 id) external nonReentrant {
   }
 
   // effects
-  uint256 currentAllowance = allowanceRemaining[p.recipientHatId][p.fundingToken];
-  uint256 newAllowance = currentAllowance + p.fundingAmount;
-  if (newAllowance < currentAllowance) revert AllowanceOverflow();
+  uint88 currentAllowance = allowanceRemaining[p.recipientHatId][p.fundingToken];
+  uint88 newAllowance = currentAllowance + p.fundingAmount;
   allowanceRemaining[p.recipientHatId][p.fundingToken] = newAllowance;
 
   // execute the multicall bytes
   p.state = ProposalState.Executed;
 
   emit Executed(id);
-  emit FundingApproved(p.recipientHatId, p.fundingToken, p.fundingAmount);
 }
 
 function withdraw(uint256 recipientHatId, address token, uint256 amount, address to)
