@@ -123,7 +123,8 @@ address public allowanceModule;               // Safe AllowanceModule (Spending 
 uint256 public ownerHatId;
 uint256 public proposerHatId;
 uint256 public approverHatId;
-uint256 public executorHatId; // 0 => public execution
+uint256 public executorHatId; // PUBLIC_SENTINEL (1) => public execution
+uint256 public constant PUBLIC_SENTINEL = 1; // never a valid Hats ID
 uint256 public escalatorHatId;
 
 // Pauses
@@ -151,14 +152,9 @@ function propose(
 function approveAndQueue(bytes32 proposalId) external;   // Approver Hat
 
 function execute(bytes32 proposalId) external;
-// Public; if executorHatId != 0, caller must wear Executor Hat
+// Public; if executorHatId != PUBLIC_SENTINEL, caller must wear Executor Hat
 
-function approveAndExecute(
-  bytes   calldata hatsMulticall,
-  uint256 recipientHatId,
-  address fundingToken,
-  uint88  fundingAmount  // optimized for storage packing
-) external returns (bytes32 proposalId);  // Proposer + Approver hats
+function approveAndExecute(bytes32 proposalId) external returns (bytes32);  // Approver Hat (+ Executor Hat if set)
 
 function escalate(bytes32 proposalId) external;          // Escalator Hat (pre-execution)
 function reject(bytes32 proposalId) external;            // Approver Hat (rejection)
@@ -214,7 +210,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Requires `!pausedExecute`.
 - Requires `state == ProposalState.Succeeded` and `now >= eta`.
 - Requires not previously `Escalated`, `Canceled`, or `Defeated` (state-machine: only `ProposalState.Succeeded` may proceed).
-- If `executorHatId != 0`, caller must wear Executor Hat.
+- If `executorHatId != PUBLIC_SENTINEL`, caller must wear Executor Hat.
 - If `p.hatsMulticall.length > 0`, performs `IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall)` (revert on failure). If `p.hatsMulticall.length == 0`, skip the Hats call (funding‑only proposal).
 - On success:
   - Increase Proposal Hatter's internal ledger with overflow protection: check that `allowanceRemaining[recipientHatId][fundingToken] + fundingAmount` does not overflow, then `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
@@ -222,13 +218,14 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
   - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])` and `FundingApproved(recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
 
-### 5.4 approveAndExecute(...) — Proposer + Approver Hats
+### 5.4 approveAndExecute(proposalId) — Approver Hat (+ Executor Hat if set)
 
-- Convenience path for zero‑delay proposals:
-  - Internally `propose(..., timelockSec=uint32(0), salt=<as passed>)` → `proposalId`.
-  - Mark `Succeeded` (`eta=now`) and run `execute(proposalId)`.
-- Caller must wear both Proposer and Approver Hats.
-- Emits `Proposed`, `Succeeded`, `Executed`, `FundingApproved`.
+- Convenience path to approve and execute an existing proposal in a single call when `timelockSec == 0`.
+- Requires caller wears the Approver Hat.
+- If `executorHatId != PUBLIC_SENTINEL`, caller must also wear the Executor Hat.
+- Requires current `state == ProposalState.Active` and stored `timelockSec == 0`.
+- Sets `eta = now`, sets `state = ProposalState.Succeeded`, emits `Succeeded`, then runs `execute(proposalId)`.
+- Emits `Succeeded`, `Executed`, and `FundingApproved` (no `Proposed`, since the proposal already exists).
 
 ### 5.5 escalate(proposalId) — Escalator Hat
 
@@ -367,7 +364,7 @@ Audits / Lindy:
 
 - Two layers of limit: Proposal Hatter’s governance‑canonical ledger + Safe’s module limit. Either can stop a withdrawal; both must allow it.
 - Compromise model: If Proposal Hatter is compromised, module limits cap outflows; keep them “as low as practical” and top‑up operationally.
-- Reentrancy: Guard `execute` and `withdraw` using OpenZeppelin `ReentrancyGuard` (`nonReentrant`, CEI).
+- Reentrancy: Guard `execute` and `withdraw` (`nonReentrant`, CEI).
 - External calls: Only two: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) AllowanceModule in `withdraw` via `executeAllowanceTransfer`. Revert on failure. For AllowanceModule, an empty signature uses `msg.sender` as signer; ensure Proposal Hatter is the configured delegate.
 - Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol, pause Proposal Hatter (`setPauses`), or reduce/disable the Safe’s module limits to freeze payouts immediately.
 
@@ -378,7 +375,7 @@ Audits / Lindy:
 Lifecycle
 
 - Propose → Succeed → Execute happy path (with/without timelock).
-- Public execution when `executorHatId == 0`; restricted when set.
+- Public execution when `executorHatId == PUBLIC_SENTINEL`; restricted when set.
 - Duplicates: proposing identical inputs with the same salt rejects with `AlreadyUsed`; changing the salt permits a new proposal.
 
 Calldata integrity
