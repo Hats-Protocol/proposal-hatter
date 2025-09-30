@@ -1,6 +1,6 @@
 # ProposalHatter.sol — Functional Specification
 
-Status: Draft v1.4
+Status: Draft v1.5
 
 Date: 2025-09-29
 
@@ -29,40 +29,41 @@ This spec is for a minimal version of this concept that, if successful, will be 
 ## 1) External Dependencies & Ownership Model
 
 - Vault = Safe. The DAO is the Safe owner(s) and can execute arbitrary transactions via normal Safe flows (multisig or delegate to governance).
-- AllowanceModule (Safe "Spending Limits") is enabled for that Safe. It lets Safe owners assign spending limits (one‑time or periodic) per token/ETH to a delegate/beneficiary—here, ProposalHatter.sol is configured as the **delegate** with permission to execute transfers within owner‑set limits. Hat wearers calling `withdraw()` are the **beneficiaries** who receive the funds.
+- AllowanceModule (Safe "Spending Limits") is enabled for that Safe. It lets Safe owners assign spending limits (one-time or periodic) per token/ETH to a delegate/beneficiary—here, ProposalHatter.sol is configured as the **delegate** with permission to execute transfers within owner-set limits. Hat wearers calling `withdraw()` are the **beneficiaries** who receive the funds.
 - Hats Protocol (`HATS_PROTOCOL_ADDRESS`), used for `isWearerOfHat` and to run the exact multicall payload.
 
 Hats integration calls used:
-- `createHat(admin, details, maxSupply, eligibility, toggle, mutable, imageURI)` to create per‑proposal ticket hats and optional reserved hats.
+- `createHat(admin, details, maxSupply, eligibility, toggle, mutable, imageURI)` to create per-proposal ticket hats and optional reserved hats.
 - `changeHatToggle(hatId, newToggle)` then `setHatStatus(hatId, false)` to deactivate a reserved hat on cancel/reject.
 
-Hats module address requirements: modules cannot be zero‑address. This spec uses `EMPTY_SENTINEL = address(1)` for “no eligibility/toggle module”.
+Hats module address requirements: modules cannot be zero-address. This spec uses `EMPTY_SENTINEL = address(1)` for “no eligibility/toggle module”.
 
-Operational note: The DAO must configure Proposal Hatter with adequate per‑asset limits in the Safe’s AllowanceModule, at least as large as the expected aggregate withdrawals between top‑ups. Limits can be periodic or one‑time; owners can adjust them as needed via the Safe UI/API.
+Operational note: The DAO must configure Proposal Hatter with adequate per-asset limits in the Safe’s AllowanceModule, at least as large as the expected aggregate withdrawals between top-ups. Limits can be periodic or one-time; owners can adjust them as needed via the Safe UI/API.
 
 ETH sentinel: `address(0)` denotes native ETH in all references below.
 
 Constructor wiring:
 
 - `HATS_PROTOCOL_ADDRESS` is immutable and set at deploy.
-- `safe` (the DAO Safe) and `allowanceModule` addresses are set in the constructor (and may be updated later by Owner Hat via `setSafeAndModule`).
-- `approverBranchId` is set in the constructor (admin under which per‑proposal approver ticket hats are created) and may be updated later by Owner Hat via `setApproverBranch`.
-- `opsBranchId` is set in the constructor (branch root used for validation of per‑proposal reserved hats) and may be updated later by Owner Hat via `setOpsBranch`.
-- Role hat IDs (`ownerHatId`, `proposerHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor (and may be updated later by Owner Hat via `setRoleHats`). There is no global Approver Hat.
+- `safe` (the DAO Safe) and `allowanceModule` addresses are set in the constructor and never change post-deploy.
+- `approverBranchId` is set in the constructor (admin under which per-proposal approver ticket hats are created) and is immutable thereafter.
+- `opsBranchId` is set in the constructor (branch root used for validation of per-proposal reserved hats) and is immutable thereafter.
+- Role hat IDs (`proposerHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor and cannot be updated. There is no global Approver Hat.
+- Proposal Hatter has no owner role; the deployment parameters above define the entire administrative surface area.
+- Internal allowance balances can only be increased by executed proposals and decreased by withdrawals; there is no administrative path to adjust them.
 
 ---
 
 ## 2) Roles (Hat IDs, checked at call time)
 
-- Owner Hat — DAO/top‑hat. May set role hats and Safe/Module parameters stored in Proposal Hatter.
 - Proposer Hat — required to propose.
-- Approver Ticket Hat — per‑proposal hat created by `propose` (under `approverBranchId`) and minted operationally to the chosen decider; required to approve/reject and approveAndExecute for that proposal only.
+- Approver Ticket Hat — per-proposal hat created by `propose` (under `approverBranchId`) and minted operationally to the chosen decider; required to approve/reject and approveAndExecute for that proposal only.
 - Executor Hat (optional) — if unset (`0`), any address may execute after the proposal's ETA; if set, caller must wear this hat.
-- Escalator Hat — may escalate (pre‑execution veto to full DAO path).
+- Escalator Hat — may escalate (pre-execution veto to full DAO path).
 
 Additionally, each proposal has a Recipient Hat, which is the hat authorized to withdraw funds from the vault.
 
-All role checks use `Hats.isWearerOfHat(msg.sender, roleHatId)` at call time.
+All role checks use `Hats.isWearerOfHat(msg.sender, roleHatId)` at call time. There is no contract owner; once deployed, role assignments remain fixed until a new deployment occurs.
 
 Sentinels
 
@@ -134,21 +135,20 @@ struct ProposalData {
 
 mapping(bytes32 => ProposalData) public proposals;
 
-// Internal, canonical allowance ledger (Owner-adjustable; monotonic via execute(+), withdraw(-), and admin adjustments).
+// Internal, canonical allowance ledger (monotonic via execute(+), withdraw(-); no admin adjustments).
 mapping(uint256 /*hatId*/ => mapping(address /*token*/ => uint88)) public allowanceRemaining;
 
 // External integration addresses / roles:
 address public immutable HATS_PROTOCOL_ADDRESS;   // fixed at deploy
-address public safe;                          // DAO’s Safe address
-address public allowanceModule;               // Safe AllowanceModule (Spending Limits)
+address public immutable safe;                    // DAO’s Safe address
+address public immutable allowanceModule;         // Safe AllowanceModule (Spending Limits)
 
-uint256 public ownerHatId;
-uint256 public proposerHatId;
-uint256 public executorHatId; // PUBLIC_SENTINEL (1) => public execution
+uint256 public immutable proposerHatId;
+uint256 public immutable executorHatId; // PUBLIC_SENTINEL (1) => public execution
 uint256 public constant PUBLIC_SENTINEL = 1; // never a valid Hats ID
-uint256 public escalatorHatId;
-uint256 public approverBranchId; // admin under which per-proposal approver ticket hats are created
-uint256 public opsBranchId; // admin under which per-proposal operational hats are created
+uint256 public immutable escalatorHatId;
+uint256 public immutable approverBranchId; // admin under which per-proposal approver ticket hats are created
+uint256 public immutable opsBranchId; // admin under which per-proposal operational hats are created
 
 ```
 
@@ -198,13 +198,7 @@ function computeProposalId(
   bytes32 salt
 ) external view returns (bytes32);
 
-// ---- Admin (Owner Hat) ----
-function setSafeAndModule(address safe_, address allowanceModule_) external;
-function setRoleHats(uint256 owner, uint256 proposer, uint256 executor, uint256 escalator) external;
-function setApproverBranch(uint256 approverBranchId) external;
-function setOpsBranch(uint256 opsBranchId) external;
-function decreaseAllowance(uint256 hatId, address token, uint88 amount) external;
-function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
+// No admin surface: deployment parameters are immutable.
 ```
 
 ---
@@ -242,6 +236,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - If `p.hatsMulticall.length > 0`, performs `IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall)` (revert on failure). If `p.hatsMulticall.length == 0`, skip the Hats call (funding‑only proposal).
 - On success:
   - Increase Proposal Hatter's internal ledger with overflow protection: check that `allowanceRemaining[recipientHatId][fundingToken] + fundingAmount` does not overflow, then `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
+  - This path is the sole mechanism that increases internal allowances.
   - Set state `ProposalState.Executed`.
   - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
@@ -286,10 +281,11 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Effects: decrement internal allowance; then instruct the Safe AllowanceModule to transfer funds from the Safe to `to`:
   - ETH: `token == address(0)`.
   - ERC‑20: `token` is the token address.
-- Revert on any module error; if revert, restore the internal allowance to its previous value.
+- Revert on any module error.
 - Event: `AllowanceConsumed(recipientHatId, token, amount, remaining, to, msg.sender)`.
 - Emits both the payout destination and caller for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
+- This pathway is the only mechanism that reduces internal allowances (outside of revert rollbacks).
 
 Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`, passing `safe` from storage, `paymentToken = address(0)`, `payment = 0`, `delegate = address(this)`, and `signature = ""` (empty bytes). ETH is represented by `token == address(0)`. The module treats an empty signature as authorization by `msg.sender`, so Proposal Hatter must be configured as the delegate for the Safe in the AllowanceModule.
 
@@ -325,14 +321,6 @@ event AllowanceConsumed(
   address indexed to
 );
 
-event SafeAndModuleUpdated(address indexed safe, address indexed allowanceModule);
-event RoleHatsUpdated(uint256 indexed ownerHatId, uint256 indexed proposerHatId,
-                      uint256 executorHatId, uint256 escalatorHatId);
-event ApproverBranchUpdated(uint256 approverBranchId);
-event OpsBranchUpdated(uint256 opsBranchId);
-
-event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, uint256 oldAmount, uint256 newAmount);
-
 ```
 
 ---
@@ -342,8 +330,8 @@ event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, u
 - Exact‑bytes execution: only the stored `hatsMulticall` bytes can be executed when present. Funding‑only proposals (empty `hatsMulticall`) execute without a Hats call.
 - Atomicity: if the Hats call fails, nothing changes (no funding approval).
 - Spend monotonicity and authority:
-  - `allowanceRemaining` increases only via successful `execute` or via Owner admin `setAllowance`/`decreaseAllowance`.
-  - `allowanceRemaining` decreases only via `withdraw` or Owner admin `decreaseAllowance`/`setAllowance`.
+  - `allowanceRemaining` increases only via successful `execute`.
+  - `allowanceRemaining` decreases only via `withdraw`.
   - Maximum allowance per hat is `type(uint88).max` for storage optimization while maintaining sufficient range.
 - Treasury custody: committee has no access; Proposal Hatter is the only actor orchestrating transfers via the Safe's AllowanceModule within owner‑set module limits.
 - Replay safety: `proposalId` binds chain, this contract, Hats Protocol target, payload bytes, recipient hat, token, amount, timelock, and salt. Identical inputs with the same salt are deduped; choosing a new salt permits a fresh proposal for the same payload.
@@ -556,17 +544,15 @@ function withdraw(uint256 recipientHatId, address token, uint256 amount, address
 //   address hatsProtocol,
 //   address safe_,
 //   address allowanceModule_,
-//   uint256 owner,
 //   uint256 proposer,
 //   uint256 executor,
 //   uint256 escalator,
-//   uint256 approverBranchId,
-//   uint256 opsBranchId,
+//   uint256 approverBranchId_,
+//   uint256 opsBranchId_,
 // ) { ... }
 // - Sets immutable HATS_PROTOCOL_ADDRESS = hatsProtocol
 // - Sets safe = safe_ and allowanceModule = allowanceModule_
-// - Sets role hat IDs (no global Approver) and approverBranchId to the provided values
-// - Emits SafeAndModuleUpdated and RoleHatsUpdated
+// - Sets immutable role hat IDs (no global Approver) and immutable branch ids to the provided values
 ```
 
 > Module call signature fixed in this spec: `executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`.
