@@ -1,6 +1,6 @@
 # ProposalHatter.sol — Functional Specification
 
-Status: Draft v1.3
+Status: Draft v1.4
 
 Date: 2025-09-29
 
@@ -14,7 +14,11 @@ Scope: Single contract (ProposalHatter.sol). No proxy/upgradability assumed unle
 
 ## 0) Purpose & Summary
 
-We want decider trust zones to approve exactly-specified Hats changes and bounded funding, without giving the decider custody of funds or access controls. Proposals hash‑commit the precise Hats `multicall` bytes and the funding allowance for a Recipient Hat. After an optional timelock, anyone (or an address wearing an Executor Hat, if set) can execute the proposal. Funding is pull‑based: a Recipient Hat wearer calls Proposal Hatter, which (a) verifies entitlement and internal allowance, then (b) instructs the Safe AllowanceModule to transfer ETH/ERC‑20 from the DAO’s vault to the recipient.
+We want decider trust zones (hats) to approve exactly-specified Hats changes and bounded funding, without giving the decider custody of funds or access controls. Proposals hash‑commit the precise Hats `multicall` bytes and the funding allowance for a Recipient Hat. After an optional timelock, anyone (or an address wearing an Executor Hat, if set) can execute the proposal. Funding is pull‑based: a Recipient Hat wearer calls Proposal Hatter, which (a) verifies entitlement and internal allowance, then (b) instructs the Safe AllowanceModule to transfer ETH/ERC‑20 from the DAO’s vault to the recipient.
+
+Concurrency model: Each proposal has its own decider trust zone (hat) and its own optional reserved Hats subtree.
+- A unique per‑proposal Approver Ticket Hat is created at propose‑time and later minted to the selected decider; only a wearer of this hat can approve or reject that proposal.
+- Optionally, a per‑proposal Reserved Branch Hat is created at propose‑time (if a non‑zero branch root is supplied), reserving a namespace under which the proposal’s operational hats can be created without index races.
 
 Funding‑only proposals are supported: if a proposal’s `hatsMulticall` bytes are empty, it still must be executed to activate the internal allowance and enable withdrawals. In that case, the contract skips calling Hats Protocol and only applies the funding effects.
 
@@ -28,6 +32,12 @@ This spec is for a minimal version of this concept that, if successful, will be 
 - AllowanceModule (Safe "Spending Limits") is enabled for that Safe. It lets Safe owners assign spending limits (one‑time or periodic) per token/ETH to a delegate/beneficiary—here, ProposalHatter.sol is configured as the **delegate** with permission to execute transfers within owner‑set limits. Hat wearers calling `withdraw()` are the **beneficiaries** who receive the funds.
 - Hats Protocol (`HATS_PROTOCOL_ADDRESS`), used for `isWearerOfHat` and to run the exact multicall payload.
 
+Hats integration calls used:
+- `createHat(admin, details, maxSupply, eligibility, toggle, mutable, imageURI)` to create per‑proposal ticket hats and optional reserved hats.
+- `changeHatToggle(hatId, newToggle)` then `setHatStatus(hatId, false)` to deactivate a reserved hat on cancel/reject.
+
+Hats module address requirements: modules cannot be zero‑address. This spec uses `EMPTY_SENTINEL = address(1)` for “no eligibility/toggle module”.
+
 Operational note: The DAO must configure Proposal Hatter with adequate per‑asset limits in the Safe’s AllowanceModule, at least as large as the expected aggregate withdrawals between top‑ups. Limits can be periodic or one‑time; owners can adjust them as needed via the Safe UI/API.
 
 ETH sentinel: `address(0)` denotes native ETH in all references below.
@@ -36,7 +46,9 @@ Constructor wiring:
 
 - `HATS_PROTOCOL_ADDRESS` is immutable and set at deploy.
 - `safe` (the DAO Safe) and `allowanceModule` addresses are set in the constructor (and may be updated later by Owner Hat via `setSafeAndModule`).
-- All role hat IDs (`ownerHatId`, `proposerHatId`, `approverHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor (and may be updated later by Owner Hat via `setRoleHats`).
+- `approverBranchId` is set in the constructor (admin under which per‑proposal approver ticket hats are created) and may be updated later by Owner Hat via `setApproverBranch`.
+- `opsBranchId` is set in the constructor (branch root used for validation of per‑proposal reserved hats) and may be updated later by Owner Hat via `setOpsBranch`.
+- Role hat IDs (`ownerHatId`, `proposerHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor (and may be updated later by Owner Hat via `setRoleHats`). There is no global Approver Hat.
 
 ---
 
@@ -44,13 +56,18 @@ Constructor wiring:
 
 - Owner Hat — DAO/top‑hat. May set role hats and Safe/Module parameters stored in Proposal Hatter; may pause/unpause; may adjust allowances in Proposal Hatter’s ledger.
 - Proposer Hat — required to propose.
-- Approver Hat — required to approveAndQueue and approveAndExecute.
+- Approver Ticket Hat — per‑proposal hat created by `propose` (under `approverBranchId`) and minted operationally to the chosen decider; required to approve/reject and approveAndExecute for that proposal only.
 - Executor Hat (optional) — if unset (`0`), any address may execute after the proposal's ETA; if set, caller must wear this hat.
 - Escalator Hat — may escalate (pre‑execution veto to full DAO path).
 
 Additionally, each proposal has a Recipient Hat, which is the hat authorized to withdraw funds from the vault.
 
 All role checks use `Hats.isWearerOfHat(msg.sender, roleHatId)` at call time.
+
+Sentinels
+
+- `PUBLIC_SENTINEL = 1` — never a valid Hats ID; indicates public execution when set as `executorHatId`.
+- `EMPTY_SENTINEL = address(1)` — used when creating hats to indicate “no eligibility module” and “no toggle module” (Hats requires non‑zero module addresses).
 
 ---
 
@@ -66,6 +83,7 @@ Inputs defining a proposal:
 - `fundingAmount`: `uint256`
 - `timelockSec`: `uint64` (0 = no timelock)
 - `submitter`: `address` (caller of `propose`)
+- `reservedHatId`: `uint256` (optional; if non‑zero, this exact hat id is created at propose‑time; its parent must be a descendant of `opsBranchId` when `opsBranchId != 0`)
 - `salt`: `bytes32` (optional; differentiate repeated proposals with identical parameters)
 
 Deterministic IDs (global de‑duplication):
@@ -93,6 +111,7 @@ Notes:
 - `salt` is optional (e.g., `0x00`) and is emitted for provenance.
 - Full `hatsMulticall` calldata is persisted alongside each proposal for first-party UIs; integrity checks compare supplied calldata to the stored bytes.
 - Helper: `computeProposalId(...)` (see Interface) mirrors this hashing logic on-chain for UI/explorer consumption. Implementations may pre-hash `hatsMulticall` for efficiency; the canonical definition binds the hash of `hatsMulticall`.
+- Note: `reservedHatId` (if created) is not included in the `proposalId` hash derivation.
 
 ### 3.2 Storage
 
@@ -108,6 +127,8 @@ struct ProposalData {
   address fundingToken;
   uint88  fundingAmount;  // optimized for storage packing
   uint256 recipientHatId;
+  uint256 approverHatId;  // per-proposal approver ticket hat id (max supply 1)
+  uint256 reservedHatId;  // per-proposal reserved branch hat id (0 if none)
   bytes   hatsMulticall;  // full encoded payload for Hats Protocol execution & UI surfaces
 }
 
@@ -123,10 +144,11 @@ address public allowanceModule;               // Safe AllowanceModule (Spending 
 
 uint256 public ownerHatId;
 uint256 public proposerHatId;
-uint256 public approverHatId;
 uint256 public executorHatId; // PUBLIC_SENTINEL (1) => public execution
 uint256 public constant PUBLIC_SENTINEL = 1; // never a valid Hats ID
 uint256 public escalatorHatId;
+uint256 public approverBranchId; // admin under which per-proposal approver ticket hats are created
+uint256 public opsBranchId; // admin under which per-proposal operational hats are created
 
 // Pauses
 bool public pausedExecute;   // if true, execute() is paused
@@ -147,18 +169,19 @@ function propose(
   address fundingToken,
   uint88  fundingAmount, // optimized for storage packing
   uint32  timelockSec,   // 0 = no timelock
+  uint256 reservedHatId, // 0 = no reserved hat
   bytes32 salt           // optional salt for replaying identical payloads
 ) external returns (bytes32 proposalId);  // Proposer Hat
 
-function approveAndQueue(bytes32 proposalId) external;   // Approver Hat
+function approve(bytes32 proposalId) external;   // Approver Ticket Hat (per-proposal)
 
 function execute(bytes32 proposalId) external;
 // Public; if executorHatId != PUBLIC_SENTINEL, caller must wear Executor Hat
 
-function approveAndExecute(bytes32 proposalId) external returns (bytes32);  // Approver Hat (+ Executor Hat if set)
+function approveAndExecute(bytes32 proposalId) external returns (bytes32);  // Approver Ticket Hat (+ Executor Hat if set)
 
 function escalate(bytes32 proposalId) external;          // Escalator Hat (pre-execution)
-function reject(bytes32 proposalId) external;            // Approver Hat (rejection)
+function reject(bytes32 proposalId) external;            // Approver Ticket Hat (rejection)
 function cancel(bytes32 proposalId) external;            // submitter OR Owner Hat (pre-execution)
 
 // ---- Funding pull (via Safe AllowanceModule) ----
@@ -180,7 +203,9 @@ function computeProposalId(
 
 // ---- Admin (Owner Hat) ----
 function setSafeAndModule(address safe_, address allowanceModule_) external;
-function setRoleHats(uint256 owner, uint256 proposer, uint256 approver, uint256 executor, uint256 escalator) external;
+function setRoleHats(uint256 owner, uint256 proposer, uint256 executor, uint256 escalator) external;
+function setApproverBranch(uint256 approverBranchId) external;
+function setOpsBranch(uint256 opsBranchId) external;
 function setPauses(bool executePaused, bool withdrawPaused) external;
 function decreaseAllowance(uint256 hatId, address token, uint88 amount) external;
 function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
@@ -195,12 +220,20 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Requires `isWearerOfHat(msg.sender, proposerHatId)`.
 - Allows `hatsMulticall.length == 0` for funding‑only proposals.
 - Computes `proposalId` (per-salt de‑dup) and requires it is unused.
-- Stores `ProposalData{ submitter=msg.sender, eta=0, timelockSec, state=ProposalState.Active, recipientHatId, fundingToken, fundingAmount, hatsMulticall }`.
-- Event (indexed): `Proposed(proposalId, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, salt)`.
-- Note: UIs may invoke `computeProposalId` pre-call to verify or display the ID that will be emitted.
+- Creates a per‑proposal Approver Ticket Hat under `approverBranchId` with params: `details = string(proposalId)`, `maxSupply = 1`, `eligibility = EMPTY_SENTINEL`, `toggle = EMPTY_SENTINEL`, `mutable = true`; stores returned `approverHatId`. The hat is not minted by this contract.
+- If `reservedHatId != 0`, atomically create the per‑proposal Reserved Branch Hat with that exact id:
+  - Let `parent` be the admin/parent hat of `reservedHatId` (ie, the id with the last level stripped).
+  - Require `IHats(HATS_PROTOCOL_ADDRESS).getNextId(parent) == reservedHatId` (prevents index races).
+  - If `opsBranchId != 0`, require `parent` is a descendant (direct child or deeper) of `opsBranchId`.
+  - Call `createHat(parent, details=string(proposalId), maxSupply=1, eligibility=EMPTY_SENTINEL, toggle=EMPTY_SENTINEL, mutable=true, imageURI="")`.
+  - Do not mint this hat.
+- Stores `ProposalData{ submitter=msg.sender, eta=0, timelockSec, state=ProposalState.Active, recipientHatId, fundingToken, fundingAmount, approverHatId, reservedHatId, hatsMulticall }`.
+- Event (indexed): `Proposed(proposalId, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, approverHatId, reservedHatId, salt)`.
+- Note: UIs may invoke `computeProposalId` pre-call to verify or display the ID that will be emitted. `reservedHatId` is not included in the hash.
 
-### 5.2 approveAndQueue(proposalId) — Approver Hat
+### 5.2 approve(proposalId) — Approver Ticket Hat
 
+- Requires caller wears this proposal's `approverHatId`.
 - Requires current `state == ProposalState.Active`.
 - Sets `eta = now + timelockSec` (uses stored per‑proposal `timelockSec`); sets `state = ProposalState.Succeeded` (proposal succeeded and awaits ETA).
 - Event: `Succeeded(proposalId, msg.sender, eta)`.
@@ -218,10 +251,10 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
   - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
 
-### 5.4 approveAndExecute(proposalId) — Approver Hat (+ Executor Hat if set)
+### 5.4 approveAndExecute(proposalId) — Approver Ticket Hat (+ Executor Hat if set)
 
 - Convenience path to approve and execute an existing proposal in a single call when `timelockSec == 0`.
-- Requires caller wears the Approver Hat.
+- Requires caller wears this proposal's `approverHatId`.
 - If `executorHatId != PUBLIC_SENTINEL`, caller must also wear the Executor Hat.
 - Requires current `state == ProposalState.Active` and stored `timelockSec == 0`.
 - Sets `eta = now`, sets `state = ProposalState.Succeeded`, emits `Succeeded`, then runs `execute(proposalId)`.
@@ -233,19 +266,23 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Sets state `ProposalState.Escalated`.
 - Event: `Escalated(proposalId, msg.sender)`.
 - Effect: An `Escalated` proposal cannot be executed by Proposal Hatter; the DAO may proceed via its own governance paths outside Proposal Hatter if desired.
+- Reserved hat is left untouched on escalate.
 
 ### 5.6 cancel(proposalId) — submitter or Owner Hat
 
 - Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Succeeded`} anytime pre‑execution (no pre‑ETA restriction).
 - Sets state `ProposalState.Canceled`.
 - Event: `Canceled(proposalId, by)`.
+- Cleanup: if `reservedHatId != 0`, set its toggle to `address(this)` via `Hats.changeHatToggle(reservedHatId, address(this))`, then deactivate via `Hats.setHatStatus(reservedHatId, false)`.
 
-### 5.7 reject(proposalId) — Approver Hat (committee rejection)
+### 5.7 reject(proposalId) — Approver Ticket Hat (decider rejection)
 
+- Requires caller wears this proposal's `approverHatId`.
 - Allowed when state == `ProposalState.Active`.
 - Sets state `ProposalState.Defeated`.
 - Event: `Defeated(proposalId, by)`.
 - Rationale: models a committee rejection akin to Governor’s `Defeated` outcome.
+- Cleanup: if `reservedHatId != 0`, set its toggle to `address(this)` via `Hats.changeHatToggle(reservedHatId, address(this))`, then deactivate via `Hats.setHatStatus(reservedHatId, false)`.
 
 ### 5.8 withdraw(recipientHatId, token, amount, to) — Recipient Hat wearer
 
@@ -269,7 +306,9 @@ Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, ad
 ```solidity
 event Proposed(bytes32 indexed proposalId, address indexed submitter,
                uint256 indexed recipientHatId, address fundingToken,
-               uint256 fundingAmount, uint32 timelockSec, bytes32 salt);
+               uint256 fundingAmount, uint32 timelockSec,
+               uint256 approverHatId, uint256 reservedHatId,
+               bytes32 salt);
 
 event Succeeded(bytes32 indexed proposalId, address indexed by, uint64 eta);
 event Executed(
@@ -284,12 +323,6 @@ event Escalated(bytes32 indexed proposalId, address indexed by);
 event Canceled(bytes32 indexed proposalId, address indexed by);
 event Defeated(bytes32 indexed proposalId, address indexed by);
 
-event FundingApproved(
-  uint256 indexed recipientHatId,
-  address indexed fundingToken,
-  uint256 amount,
-  uint256 allowanceRemaining
-);
 event AllowanceConsumed(
   uint256 indexed recipientHatId,
   address indexed token,
@@ -300,10 +333,13 @@ event AllowanceConsumed(
 
 event SafeAndModuleUpdated(address indexed safe, address indexed allowanceModule);
 event RoleHatsUpdated(uint256 indexed ownerHatId, uint256 indexed proposerHatId,
-                      uint256 indexed approverHatId, uint256 executorHatId, uint256 escalatorHatId);
+                      uint256 executorHatId, uint256 escalatorHatId);
+event ApproverBranchUpdated(uint256 approverBranchId);
+event OpsBranchUpdated(uint256 opsBranchId);
 
 event Paused(bool executePaused, bool withdrawPaused);
 event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, uint256 oldAmount, uint256 newAmount);
+
 ```
 
 ---
@@ -386,7 +422,7 @@ Escalation / Cancel / Defeat
 
 - `escalate` (Escalator Hat) blocks execution.
 - `cancel` by submitter and by Owner Hat at any time pre‑execution.
-- `reject` by Approver Hat sets proposal to `Defeated` and blocks execution.
+- `reject` by Approver Ticket Hat wearer sets proposal to `Defeated` and blocks execution.
 
 Withdrawals
 
@@ -421,17 +457,55 @@ function propose(...) external returns (bytes32 id) {
   id = keccak256(abi.encode(block.chainid, address(this), HATS_PROTOCOL_ADDRESS,
                             hatsHash, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt));
   if (proposals[id].state != ProposalState.None) revert AlreadyUsed(id);
+
+  // Create per-proposal approver ticket hat under approverBranchId (details = proposalId)
+  uint256 approverHatId = IHats(HATS_PROTOCOL_ADDRESS).createHat(
+    approverBranchId,
+    Strings.toHexString(id),
+    1,
+    EMPTY_SENTINEL,
+    EMPTY_SENTINEL,
+    true,
+    ""
+  );
+
+  // Optionally create reserved branch hat with exact id = reservedHatId (details = proposalId)
+  uint256 reservedHatId = 0;
+  if (inputReservedHatId != 0) {
+    // derive parent id from the input hat id
+    uint256 parent = parentOf(inputReservedHatId);
+    // must be the next child to prevent index races
+    if (IHats(HATS_PROTOCOL_ADDRESS).getNextId(parent) != inputReservedHatId) revert InvalidReservedHatId();
+    // if opsBranchId is set, require parent is a descendant of opsBranchId
+    if (opsBranchId != 0 && !isDescendant(parent, opsBranchId)) revert InvalidReservedHatBranch();
+    // create the reserved hat under its parent
+    reservedHatId = IHats(HATS_PROTOCOL_ADDRESS).createHat(
+      parent,
+      Strings.toHexString(id),
+      1,
+      EMPTY_SENTINEL,
+      EMPTY_SENTINEL,
+      true,
+      ""
+    );
+    // sanity: ensure returned id matches input
+    assert(reservedHatId == inputReservedHatId);
+  }
+
   proposals[id] = ProposalData({
     submitter: msg.sender,
     eta: 0,
     timelockSec: timelockSec,
     state: ProposalState.Active,
-    hatsMulticall: hatsMulticall,
-    recipientHatId: recipientHatId,
     fundingToken: fundingToken,
-    fundingAmount: fundingAmount
+    fundingAmount: fundingAmount,
+    recipientHatId: recipientHatId,
+    approverHatId: approverHatId,
+    reservedHatId: reservedHatId,
+    hatsMulticall: hatsMulticall
   });
-  emit Proposed(id, msg.sender, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt);
+
+  emit Proposed(id, msg.sender, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), approverHatId, reservedHatId, salt);
 }
 
 function execute(bytes32 id) external nonReentrant {
@@ -519,13 +593,14 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external 
 //   address allowanceModule_,
 //   uint256 owner,
 //   uint256 proposer,
-//   uint256 approver,
 //   uint256 executor,
-//   uint256 escalator
+//   uint256 escalator,
+//   uint256 approverBranchId,
+//   uint256 opsBranchId,
 // ) { ... }
 // - Sets immutable HATS_PROTOCOL_ADDRESS = hatsProtocol
 // - Sets safe = safe_ and allowanceModule = allowanceModule_
-// - Sets role hat IDs to the provided values
+// - Sets role hat IDs (no global Approver) and approverBranchId to the provided values
 // - Emits SafeAndModuleUpdated and RoleHatsUpdated
 ```
 
