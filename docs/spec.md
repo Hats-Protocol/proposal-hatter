@@ -120,17 +120,24 @@ Notes:
 enum ProposalState { None, Active, Succeeded, Escalated, Canceled, Defeated, Executed }
 // Mirrors OpenZeppelin Governor states where applicable; Escalated is Proposal Hatter-specific.
 
+// Storage-optimized struct (5 slots + dynamic bytes):
+// Slot 0: submitter (20) + fundingAmount (11) + state (1) = 32 bytes
+// Slot 1: fundingToken (20) + eta (8) + timelockSec (4) = 32 bytes
+// Slot 2: recipientHatId (32 bytes)
+// Slot 3: approverHatId (32 bytes)
+// Slot 4: reservedHatId (32 bytes)
+// Slot 5+: hatsMulticall (dynamic)
 struct ProposalData {
-  address submitter;
-  uint64  eta;            // queue time (now + timelockSec)
-  uint32  timelockSec;    // per-proposal delay; 0 = none (uint32 for packing)
-  ProposalState state;
-  address fundingToken;
-  uint88  fundingAmount;  // optimized for storage packing
-  uint256 recipientHatId;
-  uint256 approverHatId;  // per-proposal approver ticket hat id (max supply 1)
-  uint256 reservedHatId;  // per-proposal reserved branch hat id (0 if none)
-  bytes   hatsMulticall;  // full encoded payload for Hats Protocol execution & UI surfaces
+  address submitter;         // 20 bytes
+  uint88  fundingAmount;     // 11 bytes (optimized for storage packing)
+  ProposalState state;       // 1 byte
+  address fundingToken;      // 20 bytes
+  uint64  eta;               // 8 bytes (queue time: now + timelockSec)
+  uint32  timelockSec;       // 4 bytes (per-proposal delay; 0 = none)
+  uint256 recipientHatId;    // 32 bytes
+  uint256 approverHatId;     // 32 bytes (per-proposal approver ticket hat id, max supply 1)
+  uint256 reservedHatId;     // 32 bytes (per-proposal reserved branch hat id, 0 if none)
+  bytes   hatsMulticall;     // dynamic (full encoded payload for Hats Protocol execution & UI surfaces)
 }
 
 mapping(bytes32 => ProposalData) public proposals;
@@ -217,8 +224,8 @@ function computeProposalId(
   - If `opsBranchId != 0`, require `parent` is a descendant (direct child or deeper) of `opsBranchId`.
   - Call `createHat(parent, details=string(proposalId), maxSupply=1, eligibility=EMPTY_SENTINEL, toggle=EMPTY_SENTINEL, mutable=true, imageURI="")`.
   - Do not mint this hat.
-- Stores `ProposalData{ submitter=msg.sender, eta=0, timelockSec, state=ProposalState.Active, recipientHatId, fundingToken, fundingAmount, approverHatId, reservedHatId, hatsMulticall }`.
-- Event (indexed): `Proposed(proposalId, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, approverHatId, reservedHatId, salt)`.
+- Stores `ProposalData{ submitter=msg.sender, fundingAmount, state=ProposalState.Active, fundingToken, eta=0, timelockSec, recipientHatId, approverHatId, reservedHatId, hatsMulticall }` (fields ordered for optimal storage packing).
+- Event (indexed): `Proposed(proposalId, hatsMulticallHash, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, approverHatId, reservedHatId, salt)`. The `hatsMulticallHash` (keccak256 of the multicall bytes) is emitted for off-chain verification.
 - Note: UIs may invoke `computeProposalId` pre-call to verify or display the ID that will be emitted. `reservedHatId` is not included in the hash.
 
 ### 5.2 approve(proposalId) — Approver Ticket Hat
@@ -299,11 +306,18 @@ Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, ad
 ## 6) Events (all indexed)
 
 ```solidity
-event Proposed(bytes32 indexed proposalId, address indexed submitter,
-               uint256 indexed recipientHatId, address fundingToken,
-               uint256 fundingAmount, uint32 timelockSec,
-               uint256 approverHatId, uint256 reservedHatId,
-               bytes32 salt);
+event Proposed(
+  bytes32 indexed proposalId,
+  bytes32 indexed hatsMulticallHash,  // keccak256(hatsMulticall) for off-chain verification
+  address indexed submitter,
+  uint256 recipientHatId,
+  address fundingToken,
+  uint256 fundingAmount,
+  uint32 timelockSec,
+  uint256 approverHatId,
+  uint256 reservedHatId,
+  bytes32 salt
+);
 
 event Succeeded(bytes32 indexed proposalId, address indexed by, uint64 eta);
 event Executed(
@@ -481,18 +495,19 @@ function propose(...) external returns (bytes32 id) {
 
   proposals[id] = ProposalData({
     submitter: msg.sender,
-    eta: 0,
-    timelockSec: timelockSec,
+    fundingAmount: fundingAmount,
     state: ProposalState.Active,
     fundingToken: fundingToken,
-    fundingAmount: fundingAmount,
+    eta: 0,
+    timelockSec: timelockSec,
     recipientHatId: recipientHatId,
     approverHatId: approverHatId,
     reservedHatId: reservedHatId,
     hatsMulticall: hatsMulticall
   });
 
-  emit Proposed(id, msg.sender, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), approverHatId, reservedHatId, salt);
+  bytes32 hatsMulticallHash = keccak256(hatsMulticall);
+  emit Proposed(id, hatsMulticallHash, msg.sender, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), approverHatId, reservedHatId, salt);
 }
 
 function execute(bytes32 id) external nonReentrant {
