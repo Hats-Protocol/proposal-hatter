@@ -54,7 +54,7 @@ Constructor wiring:
 
 ## 2) Roles (Hat IDs, checked at call time)
 
-- Owner Hat — DAO/top‑hat. May set role hats and Safe/Module parameters stored in Proposal Hatter; may pause/unpause; may adjust allowances in Proposal Hatter’s ledger.
+- Owner Hat — DAO/top‑hat. May set role hats and Safe/Module parameters stored in Proposal Hatter.
 - Proposer Hat — required to propose.
 - Approver Ticket Hat — per‑proposal hat created by `propose` (under `approverBranchId`) and minted operationally to the chosen decider; required to approve/reject and approveAndExecute for that proposal only.
 - Executor Hat (optional) — if unset (`0`), any address may execute after the proposal's ETA; if set, caller must wear this hat.
@@ -150,9 +150,6 @@ uint256 public escalatorHatId;
 uint256 public approverBranchId; // admin under which per-proposal approver ticket hats are created
 uint256 public opsBranchId; // admin under which per-proposal operational hats are created
 
-// Pauses
-bool public pausedExecute;   // if true, execute() is paused
-bool public pausedWithdraw;  // if true, withdraw() is paused
 ```
 
 Proposal Hatter’s own allowance ledger is authoritative for governance. The Safe’s AllowanceModule is an outer guardrail; it must be configured with an owner‑set limit ≥ the near‑term total Proposal Hatter will spend per asset.
@@ -182,7 +179,7 @@ function approveAndExecute(bytes32 proposalId) external returns (bytes32);  // A
 
 function escalate(bytes32 proposalId) external;          // Escalator Hat (pre-execution)
 function reject(bytes32 proposalId) external;            // Approver Ticket Hat (rejection)
-function cancel(bytes32 proposalId) external;            // submitter OR Owner Hat (pre-execution)
+function cancel(bytes32 proposalId) external;            // proposal submitter
 
 // ---- Funding pull (via Safe AllowanceModule) ----
 function withdraw(
@@ -206,7 +203,6 @@ function setSafeAndModule(address safe_, address allowanceModule_) external;
 function setRoleHats(uint256 owner, uint256 proposer, uint256 executor, uint256 escalator) external;
 function setApproverBranch(uint256 approverBranchId) external;
 function setOpsBranch(uint256 opsBranchId) external;
-function setPauses(bool executePaused, bool withdrawPaused) external;
 function decreaseAllowance(uint256 hatId, address token, uint88 amount) external;
 function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 ```
@@ -240,7 +236,6 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 
 ### 5.3 execute(proposalId) — Public / Executor Hat optional
 
-- Requires `!pausedExecute`.
 - Requires `state == ProposalState.Succeeded` and `now >= eta`.
 - Requires not previously `Escalated`, `Canceled`, or `Defeated` (state-machine: only `ProposalState.Succeeded` may proceed).
 - If `executorHatId != PUBLIC_SENTINEL`, caller must wear Executor Hat.
@@ -268,7 +263,7 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 - Effect: An `Escalated` proposal cannot be executed by Proposal Hatter; the DAO may proceed via its own governance paths outside Proposal Hatter if desired.
 - Reserved hat is left untouched on escalate.
 
-### 5.6 cancel(proposalId) — submitter or Owner Hat
+### 5.6 cancel(proposalId) — proposal submitter
 
 - Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Succeeded`} anytime pre‑execution (no pre‑ETA restriction).
 - Sets state `ProposalState.Canceled`.
@@ -286,7 +281,6 @@ function setAllowance(uint256 hatId, address token, uint88 newAmount) external;
 
 ### 5.8 withdraw(recipientHatId, token, amount, to) — Recipient Hat wearer
 
-- Requires `!pausedWithdraw`.
 - Requires caller wears `recipientHatId`.
 - Requires `allowanceRemaining[recipientHatId][token] >= amount`.
 - Effects: decrement internal allowance; then instruct the Safe AllowanceModule to transfer funds from the Safe to `to`:
@@ -337,7 +331,6 @@ event RoleHatsUpdated(uint256 indexed ownerHatId, uint256 indexed proposerHatId,
 event ApproverBranchUpdated(uint256 approverBranchId);
 event OpsBranchUpdated(uint256 opsBranchId);
 
-event Paused(bool executePaused, bool withdrawPaused);
 event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, uint256 oldAmount, uint256 newAmount);
 
 ```
@@ -360,15 +353,12 @@ event AllowanceAdjusted(uint256 indexed recipientHatId, address indexed token, u
 
 ## 8) Errors (custom errors recommended)
 
-- `error NotHatWearer(uint256 requiredHatId);`
+- `error NotAuthorized();`
 - `error InvalidState(ProposalState current);`
 - `error TooEarly(uint64 eta, uint64 nowTs);`
 - `error AllowanceExceeded(uint256 remaining, uint256 requested);`
 - `error ModuleCallFailed();`
 - `error AlreadyUsed(bytes32 proposalId);`
-- `error NotSubmitterOrOwner();`
-- `error ExecutionPaused();`
-- `error WithdrawPaused();`
 - `error ZeroAddress();`
 
 ---
@@ -400,7 +390,7 @@ Audits / Lindy:
 - Compromise model: If Proposal Hatter is compromised, module limits cap outflows; keep them “as low as practical” and top‑up operationally.
 - Reentrancy: Guard `execute` and `withdraw` (`nonReentrant`, CEI).
 - External calls: Only two: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) AllowanceModule in `withdraw` via `executeAllowanceTransfer`. Revert on failure. For AllowanceModule, an empty signature uses `msg.sender` as signer; ensure Proposal Hatter is the configured delegate.
-- Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol, pause Proposal Hatter (`setPauses`), or reduce/disable the Safe’s module limits to freeze payouts immediately.
+- Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol, or reduce/disable the Safe’s module limits to freeze payouts immediately.
 
 ---
 
@@ -421,7 +411,7 @@ Calldata integrity
 Escalation / Cancel / Defeat
 
 - `escalate` (Escalator Hat) blocks execution.
-- `cancel` by submitter and by Owner Hat at any time pre‑execution.
+- `cancel` by submitter at any time pre‑execution.
 - `reject` by Approver Ticket Hat wearer sets proposal to `Defeated` and blocks execution.
 
 Withdrawals
@@ -435,11 +425,10 @@ Module limit interaction
 
 - Simulate module cap lower than Proposal Hatter’s ledger → transfer hits module cap and fails; further transfers must wait for ops to increase module limit.
 
-Reentrancy & Pauses
+Reentrancy
 
 - Malicious token hook tries to reenter `withdraw` → blocked by `nonReentrant`.
 - External reentry attempt into `execute` during Hats call → blocked by `nonReentrant`.
-- `setPauses(true, false)` blocks `execute` only; `setPauses(false, true)` blocks `withdraw` only.
 
 Admin adjustments
 
@@ -452,7 +441,7 @@ Admin adjustments
 
 ```solidity
 function propose(...) external returns (bytes32 id) {
-  if (!Hats.isWearerOfHat(msg.sender, proposerHatId)) revert NotHatWearer(proposerHatId);
+  if (!Hats.isWearerOfHat(msg.sender, proposerHatId)) revert NotAuthorized();
   bytes32 hatsHash = keccak256(hatsMulticall);
   id = keccak256(abi.encode(block.chainid, address(this), HATS_PROTOCOL_ADDRESS,
                             hatsHash, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt));
@@ -509,11 +498,10 @@ function propose(...) external returns (bytes32 id) {
 }
 
 function execute(bytes32 id) external nonReentrant {
-  if (pausedExecute) revert ExecutionPaused();
   ProposalData storage p = proposals[id];
   if (p.state != ProposalState.Succeeded) revert InvalidState(p.state);
   if (block.timestamp < p.eta) revert TooEarly(uint64(p.eta), uint64(block.timestamp));
-  if (executorHatId != 0 && !Hats.isWearerOfHat(msg.sender, executorHatId)) revert NotHatWearer(executorHatId);
+  if (executorHatId != 0 && !Hats.isWearerOfHat(msg.sender, executorHatId)) revert NotAuthorized();
   // interactions
   if (p.hatsMulticall.length > 0) {
     IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall);
@@ -533,8 +521,7 @@ function execute(bytes32 id) external nonReentrant {
 function withdraw(uint256 recipientHatId, address token, uint256 amount, address to)
   external nonReentrant
 {
-  if (pausedWithdraw) revert WithdrawPaused();
-  if (!Hats.isWearerOfHat(msg.sender, recipientHatId)) revert NotHatWearer(recipientHatId);
+  if (!Hats.isWearerOfHat(msg.sender, recipientHatId)) revert NotAuthorized();
 
   uint256 rem = allowanceRemaining[recipientHatId][token];
   if (rem < amount) revert AllowanceExceeded(rem, amount);
@@ -564,28 +551,6 @@ function withdraw(uint256 recipientHatId, address token, uint256 amount, address
   emit AllowanceConsumed(recipientHatId, token, amount, rem - amount);
 }
 
-// Admin adjustments (Owner Hat)
-function setPauses(bool execP, bool wdrP) external {
-  if (!Hats.isWearerOfHat(msg.sender, ownerHatId)) revert NotHatWearer(ownerHatId);
-  pausedExecute = execP; pausedWithdraw = wdrP;
-  emit Paused(execP, wdrP);
-}
-
-function decreaseAllowance(uint256 hatId, address token, uint256 amount) external {
-  if (!Hats.isWearerOfHat(msg.sender, ownerHatId)) revert NotHatWearer(ownerHatId);
-  uint256 oldAmt = allowanceRemaining[hatId][token];
-  uint256 newAmt = (amount >= oldAmt) ? 0 : (oldAmt - amount);
-  allowanceRemaining[hatId][token] = newAmt;
-  emit AllowanceAdjusted(hatId, token, oldAmt, newAmt);
-}
-
-function setAllowance(uint256 hatId, address token, uint256 newAmount) external {
-  if (!Hats.isWearerOfHat(msg.sender, ownerHatId)) revert NotHatWearer(ownerHatId);
-  uint256 oldAmt = allowanceRemaining[hatId][token];
-  allowanceRemaining[hatId][token] = newAmount;
-  emit AllowanceAdjusted(hatId, token, oldAmt, newAmount);
-}
-
 // Constructor (summary)
 // constructor(
 //   address hatsProtocol,
@@ -613,6 +578,7 @@ function setAllowance(uint256 hatId, address token, uint256 newAmount) external 
 - Policy tiers, Reality‑based challenges, per‑epoch program budgets, stream/drip schedules (can be layered later without changing the Safe wiring).
 - Auto‑provisioning Safe module limits from Proposal Hatter (module limits are owner‑set per Safe UX/API).
 - Interface abstraction/adapters for multiple module versions; upgrades will be handled by revoking Proposal Hatter’s hat and minting it to a new contract version, with any allowance data migration handled in that process.
+- Support for Hats trees that are linked or nested across multiple branches; this version assumes all relevant hats live within a single branch.
 
 ---
 
