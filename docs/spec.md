@@ -321,6 +321,17 @@ event AllowanceConsumed(
   address indexed to
 );
 
+event ProposalHatterDeployed(
+  address hatsProtocol,
+  address indexed safe,
+  address indexed allowanceModule,
+  uint256 indexed proposerHatId,
+  uint256 executorHatId,
+  uint256 escalatorHatId,
+  uint256 approverBranchId,
+  uint256 opsBranchId
+);
+
 ```
 
 ---
@@ -417,11 +428,6 @@ Reentrancy
 
 - Malicious token hook tries to reenter `withdraw` → blocked by `nonReentrant`.
 - External reentry attempt into `execute` during Hats call → blocked by `nonReentrant`.
-
-Admin adjustments
-
-- `decreaseAllowance` reduces allowance and emits `AllowanceAdjusted`.
-- `setAllowance` sets to exact new value and emits `AllowanceAdjusted`.
 
 ---
 
