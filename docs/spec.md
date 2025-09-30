@@ -145,7 +145,7 @@ address public immutable allowanceModule;         // Safe AllowanceModule (Spend
 
 uint256 public immutable proposerHatId;
 uint256 public immutable executorHatId; // PUBLIC_SENTINEL (1) => public execution
-uint256 public constant PUBLIC_SENTINEL = 1; // never a valid Hats ID
+uint256 internal constant PUBLIC_SENTINEL = 1; // sentinel for public execution
 uint256 public immutable escalatorHatId;
 uint256 public immutable approverBranchId; // admin under which per-proposal approver ticket hats are created
 uint256 public immutable opsBranchId; // admin under which per-proposal operational hats are created
@@ -185,8 +185,8 @@ function cancel(bytes32 proposalId) external;            // proposal submitter
 function withdraw(
   uint256 recipientHatId,
   address token,
-  uint88  amount,  // optimized for storage packing
-) external;  // caller must wear recipientHatId
+  uint88  amount  // optimized for storage packing
+) external;  // caller must wear recipientHatId; funds sent to msg.sender
 
 function allowanceOf(uint256 hatId, address token) external view returns (uint88);
 function computeProposalId(
@@ -233,11 +233,12 @@ function computeProposalId(
 - Requires `state == ProposalState.Succeeded` and `now >= eta`.
 - Requires not previously `Escalated`, `Canceled`, or `Defeated` (state-machine: only `ProposalState.Succeeded` may proceed).
 - If `executorHatId != PUBLIC_SENTINEL`, caller must wear Executor Hat.
-- If `p.hatsMulticall.length > 0`, performs `IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall)` (revert on failure). If `p.hatsMulticall.length == 0`, skip the Hats call (funding‑only proposal).
-- On success:
+- Effects (before external calls, per CEI pattern):
   - Increase Proposal Hatter's internal ledger with overflow protection: check that `allowanceRemaining[recipientHatId][fundingToken] + fundingAmount` does not overflow, then `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
   - This path is the sole mechanism that increases internal allowances.
   - Set state `ProposalState.Executed`.
+- Interactions:
+  - If `p.hatsMulticall.length > 0`, performs `IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall)` (revert on failure). If `p.hatsMulticall.length == 0`, skip the Hats call (funding‑only proposal).
   - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
 
@@ -274,18 +275,22 @@ function computeProposalId(
 - Rationale: models a committee rejection akin to Governor’s `Defeated` outcome.
 - Cleanup: if `reservedHatId != 0`, set its toggle to `address(this)` via `Hats.changeHatToggle(reservedHatId, address(this))`, then deactivate via `Hats.setHatStatus(reservedHatId, false)`.
 
-### 5.8 withdraw(recipientHatId, token, amount, to) — Recipient Hat wearer
+### 5.8 withdraw(recipientHatId, token, amount) — Recipient Hat wearer
 
-- Requires caller wears `recipientHatId`.
-- Requires `allowanceRemaining[recipientHatId][token] >= amount`.
-- Effects: decrement internal allowance; then instruct the Safe AllowanceModule to transfer funds from the Safe to `to`:
-  - ETH: `token == address(0)`.
-  - ERC‑20: `token` is the token address.
-- Revert on any module error.
-- Event: `AllowanceConsumed(recipientHatId, token, amount, remaining, to, msg.sender)`.
-- Emits both the payout destination and caller for downstream auditing.
+- Checks:
+  - Requires caller wears `recipientHatId`.
+  - Requires `allowanceRemaining[recipientHatId][token] >= amount`.
+- Effects (before external calls, per CEI pattern):
+  - Decrement internal allowance: `allowanceRemaining[recipientHatId][token] -= amount`.
+  - This pathway is the only mechanism that reduces internal allowances (outside of revert rollbacks).
+- Interactions:
+  - Instruct the Safe AllowanceModule to transfer funds from the Safe to `msg.sender`:
+    - ETH: `token == address(0)`.
+    - ERC‑20: `token` is the token address.
+  - Any revert from AllowanceModule bubbles up and reverts the entire transaction (including allowance changes).
+  - Event: `AllowanceConsumed(recipientHatId, token, amount, remaining, msg.sender)`.
+- Emits the payout destination (msg.sender) for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
-- This pathway is the only mechanism that reduces internal allowances (outside of revert rollbacks).
 
 Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`, passing `safe` from storage, `paymentToken = address(0)`, `payment = 0`, `delegate = address(this)`, and `signature = ""` (empty bytes). ETH is represented by `token == address(0)`. The module treats an empty signature as authorization by `msg.sender`, so Proposal Hatter must be configured as the delegate for the Safe in the AllowanceModule.
 
@@ -318,7 +323,7 @@ event AllowanceConsumed(
   address indexed token,
   uint256 amount,
   uint256 remaining,
-  address indexed to
+  address indexed to  // always msg.sender
 );
 
 event ProposalHatterDeployed(
@@ -356,7 +361,6 @@ event ProposalHatterDeployed(
 - `error InvalidState(ProposalState current);`
 - `error TooEarly(uint64 eta, uint64 nowTs);`
 - `error AllowanceExceeded(uint256 remaining, uint256 requested);`
-- `error ModuleCallFailed();`
 - `error AlreadyUsed(bytes32 proposalId);`
 - `error ZeroAddress();`
 
@@ -375,7 +379,7 @@ One‑time setup (DAO owners on the Safe):
 During operation:
 
 - Executing a proposal in Proposal Hatter increments internal allowances; it does not auto‑change Safe module limits.
-- Withdrawals call the AllowanceModule to move funds from the Safe. If a Safe module limit is lower than Proposal Hatter’s internal ledger for that token, the module will block before Proposal Hatter’s ledger is exhausted—ops should raise the module limit as needed.
+- Withdrawals call the AllowanceModule to move funds from the Safe. If a Safe module limit is lower than Proposal Hatter's internal ledger for that token, the module will revert and the allowance change will be rolled back—ops should raise the module limit as needed.
 
 Audits / Lindy:
 
@@ -416,9 +420,9 @@ Escalation / Cancel / Defeat
 Withdrawals
 
 - Non‑wearer cannot withdraw.
-- Wearer withdraw ≤ remaining → Proposal Hatter decrements and module transfer succeeds (mock module returns success).
+- Wearer withdraw ≤ remaining → Proposal Hatter decrements and module transfer succeeds.
 - Wearer withdraw > remaining → `AllowanceExceeded`.
-- Module failure (e.g., mocked revert) → `ModuleCallFailed` and ledger restored.
+- Module failure (e.g., mocked revert) → bubbles up original error and ledger is reverted.
 
 Module limit interaction
 
@@ -493,56 +497,53 @@ function propose(...) external returns (bytes32 id) {
 
 function execute(bytes32 id) external nonReentrant {
   ProposalData storage p = proposals[id];
+  // checks
   if (p.state != ProposalState.Succeeded) revert InvalidState(p.state);
   if (block.timestamp < p.eta) revert TooEarly(uint64(p.eta), uint64(block.timestamp));
-  if (executorHatId != 0 && !Hats.isWearerOfHat(msg.sender, executorHatId)) revert NotAuthorized();
+  if (executorHatId != PUBLIC_SENTINEL && !Hats.isWearerOfHat(msg.sender, executorHatId)) revert NotAuthorized();
+  
+  // effects
+  uint88 currentAllowance = allowanceRemaining[p.recipientHatId][p.fundingToken];
+  uint88 newAllowance = currentAllowance + p.fundingAmount;
+  allowanceRemaining[p.recipientHatId][p.fundingToken] = newAllowance;
+  p.state = ProposalState.Executed;
+
   // interactions
   if (p.hatsMulticall.length > 0) {
     IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall);
   }
 
-  // effects
-  uint88 currentAllowance = allowanceRemaining[p.recipientHatId][p.fundingToken];
-  uint88 newAllowance = currentAllowance + p.fundingAmount;
-  allowanceRemaining[p.recipientHatId][p.fundingToken] = newAllowance;
-
-  // execute the multicall bytes
-  p.state = ProposalState.Executed;
-
-  emit Executed(id);
+  emit Executed(id, p.recipientHatId, p.fundingToken, p.fundingAmount, newAllowance);
 }
 
-function withdraw(uint256 recipientHatId, address token, uint256 amount, address to)
+function withdraw(uint256 recipientHatId, address token, uint88 amount)
   external nonReentrant
 {
+  // checks
   if (!Hats.isWearerOfHat(msg.sender, recipientHatId)) revert NotAuthorized();
-
-  uint256 rem = allowanceRemaining[recipientHatId][token];
+  uint88 rem = allowanceRemaining[recipientHatId][token];
   if (rem < amount) revert AllowanceExceeded(rem, amount);
 
   // effects
-  allowanceRemaining[recipientHatId][token] = rem - amount;
+  uint88 newAllowance = rem - amount;
+  allowanceRemaining[recipientHatId][token] = newAllowance;
 
-  // interactions: call AllowanceModule to move funds from Safe to `to`
+  // interactions: call AllowanceModule to move funds from Safe to msg.sender
   // Signature: executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)
   // Use delegate = address(this) and signature = empty bytes to authorize as the configured delegate
-  try AllowanceModule(allowanceModule).executeAllowanceTransfer(
+  // Any revert from the module will bubble up and revert the entire transaction
+  AllowanceModule(allowanceModule).executeAllowanceTransfer(
     safe,
     token,
-    to,
+    msg.sender,
     uint96(amount),
     address(0),
     0,
     address(this),
     bytes("")
-  ) {
-    // ok
-  } catch {
-    allowanceRemaining[recipientHatId][token] = rem;
-    revert ModuleCallFailed();
-  }
+  );
 
-  emit AllowanceConsumed(recipientHatId, token, amount, rem - amount);
+  emit AllowanceConsumed(recipientHatId, token, amount, newAllowance, msg.sender);
 }
 
 // Constructor (summary)
