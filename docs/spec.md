@@ -1,8 +1,8 @@
 # ProposalHatter.sol — Functional Specification
 
-Status: Draft v1.5
+Status: Draft v1.6
 
-Date: 2025-09-29
+Date: 2025-10-02
 
 Author: Spencer
 
@@ -14,7 +14,7 @@ Scope: Single contract (ProposalHatter.sol). No proxy/upgradability assumed unle
 
 ## 0) Purpose & Summary
 
-We want decider trust zones (hats) to approve exactly-specified Hats changes and bounded funding, without giving the decider custody of funds or access controls. Proposals hash‑commit the precise Hats `multicall` bytes and the funding allowance for a Recipient Hat. After an optional timelock, anyone (or an address wearing an Executor Hat, if set) can execute the proposal. Funding is pull‑based: a Recipient Hat wearer calls Proposal Hatter, which (a) verifies entitlement and internal allowance, then (b) instructs the Safe AllowanceModule to transfer ETH/ERC‑20 from the DAO’s vault to the recipient.
+We want decider trust zones (hats) to approve exactly-specified Hats changes and bounded funding, without giving the decider custody of funds or access controls. Proposals hash‑commit the precise Hats `multicall` bytes and the funding allowance for a Recipient Hat. After an optional timelock, anyone (or an address wearing an Executor Hat, if set) can execute the proposal. Funding is pull‑based: a Recipient Hat wearer calls Proposal Hatter, which (a) verifies entitlement and internal allowance, then (b) executes a Safe module transaction to transfer ETH/ERC‑20 from the DAO’s vault to the recipient.
 
 Concurrency model: Each proposal has its own decider trust zone (hat) and its own optional reserved Hats subtree.
 - A unique per‑proposal Approver Ticket Hat is created at propose‑time and later minted to the selected decider; only a wearer of this hat can approve or reject that proposal.
@@ -29,8 +29,9 @@ This spec is for a minimal version of this concept that, if successful, will be 
 ## 1) External Dependencies & Ownership Model
 
 - Vault = Safe. The DAO is the Safe owner(s) and can execute arbitrary transactions via normal Safe flows (multisig or delegate to governance).
-- AllowanceModule (Safe "Spending Limits") is enabled for that Safe. It lets Safe owners assign spending limits (one-time or periodic) per token/ETH to a delegate/beneficiary—here, ProposalHatter.sol is configured as the **delegate** with permission to execute transfers within owner-set limits. Hat wearers calling `withdraw()` are the **beneficiaries** who receive the funds.
+- Safe Module pattern: ProposalHatter must be enabled as a module on the Safe. Withdrawals are executed via `execTransactionFromModuleReturnData` (Safe v1.4.1) using `Enum.Operation.Call` only.
 - Hats Protocol (`HATS_PROTOCOL_ADDRESS`), used for `isWearerOfHat` and to run the exact multicall payload.
+- Codebase imports `safe-global/safe-smart-account` v1.4.1 for Safe module interfaces (`ISafe`, `Enum`).
 
 Hats integration calls used:
 - `createHat(admin, details, maxSupply, eligibility, toggle, mutable, imageURI)` to create per-proposal ticket hats and optional reserved hats.
@@ -38,32 +39,34 @@ Hats integration calls used:
 
 Hats module address requirements: modules cannot be zero-address. This spec uses `EMPTY_SENTINEL = address(1)` for “no eligibility/toggle module”.
 
-Operational note: The DAO must configure Proposal Hatter with adequate per-asset limits in the Safe’s AllowanceModule, at least as large as the expected aggregate withdrawals between top-ups. Limits can be periodic or one-time; owners can adjust them as needed via the Safe UI/API.
+Operational note: The DAO must enable ProposalHatter as a module on the Safe. Safe owners may remove/disable the module at any time via Safe governance.
 
 ETH sentinel: `address(0)` denotes native ETH in all references below.
 
 Constructor wiring:
 
-- `HATS_PROTOCOL_ADDRESS` is immutable and set at deploy.
-- `safe` (the DAO Safe) and `allowanceModule` addresses are set in the constructor and never change post-deploy.
-- `approverBranchId` is set in the constructor (admin under which per-proposal approver ticket hats are created) and is immutable thereafter.
-- `opsBranchId` is set in the constructor (branch root used for validation of per-proposal reserved hats) and is immutable thereafter.
-- Role hat IDs (`proposerHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor and cannot be updated. There is no global Approver Hat.
-- Proposal Hatter has no owner role; the deployment parameters above define the entire administrative surface area.
+- `HATS_PROTOCOL_ADDRESS` is immutable and set at deploy
+- `ownerHatId` is provided in the constructor and is immutable; the “owner” is any caller wearing this hat.
+- `safe` (the DAO's vault) is provided in the constructor and MAY be updated post‑deploy by the owner via `setVault(address)`.
+- `approverBranchId` is set in the constructor (admin under which per‑proposal approver ticket hats are created) and is immutable thereafter.
+- `opsBranchId` is set in the constructor (branch root used for validation of per‑proposal reserved hats) and is immutable thereafter.
+- Role hat IDs (`proposerHatId`, `executorHatId`, `escalatorHatId`) are set in the constructor and MAY be updated post‑deploy by the owner via `setProposerHat`, `setExecutorHat`, and `setEscalatorHat`. There is no global Approver Hat.
+- Pausability: the owner may toggle `pauseProposals(bool)` and `pauseWithdrawals(bool)`. Proposal‑lifecycle pause blocks create/queue/execute (see Semantics). Withdrawals pause blocks `withdraw`. Escalate/Reject/Cancel remain unpaused.
 - Internal allowance balances can only be increased by executed proposals and decreased by withdrawals; there is no administrative path to adjust them.
 
 ---
 
 ## 2) Roles (Hat IDs, checked at call time)
 
+- Owner Hat — wearer of `ownerHatId`; required for admin/setter/pause functions.
 - Proposer Hat — required to propose.
 - Approver Ticket Hat — per-proposal hat created by `propose` (under `approverBranchId`) and minted operationally to the chosen decider; required to approve/reject and approveAndExecute for that proposal only.
-- Executor Hat (optional) — if unset (`0`), any address may execute after the proposal's ETA; if set, caller must wear this hat.
+- Executor Hat — if set to `PUBLIC_SENTINEL` (value `1`), execution is public; otherwise, caller must wear this hat.
 - Escalator Hat — may escalate (pre-execution veto to full DAO path).
 
 Additionally, each proposal has a Recipient Hat, which is the hat authorized to withdraw funds from the vault.
 
-All role checks use `Hats.isWearerOfHat(msg.sender, roleHatId)` at call time. There is no contract owner; once deployed, role assignments remain fixed until a new deployment occurs.
+All role checks use `Hats.isWearerOfHat(msg.sender, roleHatId)` at call time. Admin functions require the caller to wear the Owner Hat. Role assignments (proposer/executor/escalator) may be updated post‑deploy by the owner.
 
 Sentinels
 
@@ -147,19 +150,22 @@ mapping(uint256 /*hatId*/ => mapping(address /*token*/ => uint88)) public allowa
 
 // External integration addresses / roles:
 address public immutable HATS_PROTOCOL_ADDRESS;   // fixed at deploy
-address public immutable safe;                    // DAO’s Safe address
-address public immutable allowanceModule;         // Safe AllowanceModule (Spending Limits)
+ISafe public vault;                              // DAO’s Vault (Safe) address (owner‑settable)
 
-uint256 public immutable proposerHatId;
-uint256 public immutable executorHatId; // PUBLIC_SENTINEL (1) => public execution
-uint256 internal constant PUBLIC_SENTINEL = 1; // sentinel for public execution
-uint256 public immutable escalatorHatId;
-uint256 public immutable approverBranchId; // admin under which per-proposal approver ticket hats are created
-uint256 public immutable opsBranchId; // admin under which per-proposal operational hats are created
+uint256 public immutable ownerHatId;              // fixed at deploy (owner = wearer)
+uint256 public proposerHatId;                     // owner‑settable
+uint256 public executorHatId;                     // owner‑settable; PUBLIC_SENTINEL (1) => public execution
+uint256 public escalatorHatId;                    // owner‑settable
+uint256 public immutable APPROVER_BRANCH_ID;        // admin under which per‑proposal approver ticket hats are created
+uint256 public immutable OPS_BRANCH_ID;             // branch root used for reserved hat validation
+uint256 internal constant PUBLIC_SENTINEL = 1;    // sentinel for public execution
+
+bool public proposalsPaused;                      // owner‑settable pause for propose/approve/execute
+bool public withdrawalsPaused;                    // owner‑settable pause for withdraw
 
 ```
 
-Proposal Hatter’s own allowance ledger is authoritative for governance. The Safe’s AllowanceModule is an outer guardrail; it must be configured with an owner‑set limit ≥ the near‑term total Proposal Hatter will spend per asset.
+Proposal Hatter’s own allowance ledger is authoritative for governance. Funds move from the Safe only via ProposalHatter’s module calls; Safe owners can disable/remove the module at any time.
 
 ---
 
@@ -188,7 +194,7 @@ function escalate(bytes32 proposalId) external;          // Escalator Hat (pre-e
 function reject(bytes32 proposalId) external;            // Approver Ticket Hat (rejection)
 function cancel(bytes32 proposalId) external;            // proposal submitter
 
-// ---- Funding pull (via Safe AllowanceModule) ----
+// ---- Funding pull (via Safe Module) ----
 function withdraw(
   uint256 recipientHatId,
   address token,
@@ -205,7 +211,19 @@ function computeProposalId(
   bytes32 salt
 ) external view returns (bytes32);
 
-// No admin surface: deployment parameters are immutable.
+// ---- Admin (Owner Hat required) ----
+function pauseProposals(bool paused) external;      // Emits ProposalsPaused(paused)
+function pauseWithdrawals(bool paused) external;    // Emits WithdrawalsPaused(paused)
+
+function setProposerHat(uint256 hatId) external;    // Emits ProposerHatSet(hatId)
+function setEscalatorHat(uint256 hatId) external;   // Emits EscalatorHatSet(hatId)
+function setExecutorHat(uint256 hatId) external;    // Emits ExecutorHatSet(hatId); hatId==PUBLIC_SENTINEL enables public execution
+function setFundingSource(address safe, address allowanceModule) external; // Emits FundingSourceSet(safe, allowanceModule)
+
+// ---- Views ----
+function OWNER_HAT() external view returns (uint256);
+function proposalsPaused() external view returns (bool);
+function withdrawalsPaused() external view returns (bool);
 ```
 
 ---
@@ -215,6 +233,7 @@ function computeProposalId(
 ### 5.1 propose(...) — Proposer Hat
 
 - Requires `isWearerOfHat(msg.sender, proposerHatId)`.
+- Reverts `ProposalsPaused()` if proposals are paused.
 - Allows `hatsMulticall.length == 0` for funding‑only proposals.
 - Computes `proposalId` (per-salt de‑dup) and requires it is unused.
 - Creates a per‑proposal Approver Ticket Hat under `approverBranchId` with params: `details = string(proposalId)`, `maxSupply = 1`, `eligibility = EMPTY_SENTINEL`, `toggle = EMPTY_SENTINEL`, `mutable = true`; stores returned `approverHatId`. The hat is not minted by this contract.
@@ -230,6 +249,7 @@ function computeProposalId(
 
 ### 5.2 approve(proposalId) — Approver Ticket Hat
 
+- Reverts `ProposalsPaused()` if proposals are paused.
 - Requires caller wears this proposal's `approverHatId`.
 - Requires current `state == ProposalState.Active`.
 - Sets `eta = now + timelockSec` (uses stored per‑proposal `timelockSec`); sets `state = ProposalState.Succeeded` (proposal succeeded and awaits ETA).
@@ -237,6 +257,7 @@ function computeProposalId(
 
 ### 5.3 execute(proposalId) — Public / Executor Hat optional
 
+- Reverts `ProposalsPaused()` if proposals are paused.
 - Requires `state == ProposalState.Succeeded` and `now >= eta`.
 - Requires not previously `Escalated`, `Canceled`, or `Defeated` (state-machine: only `ProposalState.Succeeded` may proceed).
 - If `executorHatId != PUBLIC_SENTINEL`, caller must wear Executor Hat.
@@ -251,6 +272,7 @@ function computeProposalId(
 
 ### 5.4 approveAndExecute(proposalId) — Approver Ticket Hat (+ Executor Hat if set)
 
+- Reverts `ProposalsPaused()` if proposals are paused.
 - Convenience path to approve and execute an existing proposal in a single call when `timelockSec == 0`.
 - Requires caller wears this proposal's `approverHatId`.
 - If `executorHatId != PUBLIC_SENTINEL`, caller must also wear the Executor Hat.
@@ -284,6 +306,7 @@ function computeProposalId(
 
 ### 5.8 withdraw(recipientHatId, token, amount) — Recipient Hat wearer
 
+- Reverts `WithdrawalsPaused()` if withdrawals are paused.
 - Checks:
   - Requires caller wears `recipientHatId`.
   - Requires `allowanceRemaining[recipientHatId][token] >= amount`.
@@ -291,15 +314,51 @@ function computeProposalId(
   - Decrement internal allowance: `allowanceRemaining[recipientHatId][token] -= amount`.
   - This pathway is the only mechanism that reduces internal allowances (outside of revert rollbacks).
 - Interactions:
-  - Instruct the Safe AllowanceModule to transfer funds from the Safe to `msg.sender`:
-    - ETH: `token == address(0)`.
-    - ERC‑20: `token` is the token address.
-  - Any revert from AllowanceModule bubbles up and reverts the entire transaction (including allowance changes).
+  - Execute a Safe module transaction via `execTransactionFromModuleReturnData` (Safe v1.4.1, `Enum.Operation.Call` only):
+    - ETH: `to = msg.sender`, `value = amount`, `data = ""`, `operation = Call`.
+    - ERC‑20: `to = token`, `value = 0`, `data = abi.encodeWithSelector(IERC20.transfer.selector, msg.sender, amount)`, `operation = Call`.
+  - On return, require `success == true`. For ERC‑20, additionally validate return data:
+    - If `returnData.length == 0`, accept (ERC‑20s that do not return a value).
+    - Else decode as `bool ok` and require `ok == true`; otherwise revert `ERC20TransferReturnedFalse(token, returnData)`.
+  - These patterns should follow the OpenZeppelin SafeERC20 library patterns (modified for the Safe module execution, of course).
   - Event: `AllowanceConsumed(recipientHatId, token, amount, remaining, msg.sender)`.
 - Emits the payout destination (msg.sender) for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
 
-Module call note: Use `AllowanceModule.executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`, passing `safe` from storage, `paymentToken = address(0)`, `payment = 0`, `delegate = address(this)`, and `signature = ""` (empty bytes). ETH is represented by `token == address(0)`. The module treats an empty signature as authorization by `msg.sender`, so Proposal Hatter must be configured as the delegate for the Safe in the AllowanceModule.
+Decimals & amounts:
+- `amount` is always specified in the token’s base units. The contract does not query or normalize `decimals()`; UIs should display/collect human amounts using off‑chain `decimals()` reads (or curated metadata) and convert to base units before calling `withdraw`. This avoids on‑chain failures from non‑standard or missing `decimals()` implementations and eliminates rounding ambiguity (e.g., USDC’s 6 decimals vs 18‑decimals tokens).
+
+Module call note (Safe 1.4.1): use `execTransactionFromModuleReturnData(address to, uint256 value, bytes memory data, Enum.Operation operation) returns (bool success, bytes memory returnData)`. ProposalHatter must be an enabled module on the Safe. Delegatecall is never used.
+
+### 5.9 Admin (Owner Hat)
+
+- `pauseProposals(bool paused)`
+  - Only owner (caller must wear `ownerHatId`).
+  - Sets `proposalsPaused = paused` and emits `ProposalsPaused(paused)`.
+  - When paused, `propose`, `approve`, `approveAndExecute`, and `execute` revert with `ProposalsPaused()` for all callers (including the owner).
+
+- `pauseWithdrawals(bool paused)`
+  - Only owner.
+  - Sets `withdrawalsPaused = paused` and emits `WithdrawalsPaused(paused)`.
+  - When paused, `withdraw` reverts with `WithdrawalsPaused()` for all callers (including the owner).
+
+- `setProposerHat(uint256 hatId)`
+  - Only owner. No branch constraints.
+  - Sets `proposerHatId = hatId` and emits `ProposerHatSet(hatId)`.
+
+- `setEscalatorHat(uint256 hatId)`
+  - Only owner. No branch constraints.
+  - Sets `escalatorHatId = hatId` and emits `EscalatorHatSet(hatId)`.
+
+- `setExecutorHat(uint256 hatId)`
+  - Only owner. No branch constraints.
+  - Setting to `PUBLIC_SENTINEL` (1) enables public execution; otherwise execution requires this hat.
+  - Sets `executorHatId = hatId` and emits `ExecutorHatSet(hatId)`.
+
+- `setFundingSource(address safe)`
+  - Only owner. `safe` must be non‑zero or revert `ZeroAddress()`.  
+  - Updates `safe` and emits `FundingSourceSet(safe)`.
+  - Takes effect immediately for future `withdraw` calls; proposals and internal ledger are unaffected.
 
 ---
 
@@ -342,14 +401,21 @@ event AllowanceConsumed(
 
 event ProposalHatterDeployed(
   address hatsProtocol,
-  address indexed safe,
-  address indexed allowanceModule,
+  address indexed vault,
   uint256 indexed proposerHatId,
   uint256 executorHatId,
   uint256 escalatorHatId,
   uint256 approverBranchId,
   uint256 opsBranchId
 );
+
+// Admin + pause events
+event ProposalsPaused(bool paused);
+event WithdrawalsPaused(bool paused);
+event ProposerHatSet(uint256 hatId);
+event EscalatorHatSet(uint256 hatId);
+event ExecutorHatSet(uint256 hatId);
+event FundingSourceSet(address vault);
 
 ```
 
@@ -363,9 +429,10 @@ event ProposalHatterDeployed(
   - `allowanceRemaining` increases only via successful `execute`.
   - `allowanceRemaining` decreases only via `withdraw`.
   - Maximum allowance per hat is `type(uint88).max` for storage optimization while maintaining sufficient range.
-- Treasury custody: committee has no access; Proposal Hatter is the only actor orchestrating transfers via the Safe's AllowanceModule within owner‑set module limits.
+- Treasury custody: decider trust zone (eg committee) has no access; Proposal Hatter is the only actor orchestrating transfers via the Safe module interface; Safe owners can disable/remove the module at any time.
 - Replay safety: `proposalId` binds chain, this contract, Hats Protocol target, payload bytes, recipient hat, token, amount, timelock, and salt. Identical inputs with the same salt are deduped; choosing a new salt permits a fresh proposal for the same payload.
 - State machine: No execution if state ∈ {`ProposalState.Escalated`, `ProposalState.Canceled`, `ProposalState.Defeated`, `ProposalState.Executed`}.
+- Pauses: when `proposalsPaused == true`, `propose`, `approve`, `approveAndExecute`, and `execute` revert with `ProposalsPaused()` for all callers (including the owner). When `withdrawalsPaused == true`, `withdraw` reverts with `WithdrawalsPaused()`. `escalate`, `reject`, and `cancel` remain callable.
 
 ---
 
@@ -377,37 +444,36 @@ event ProposalHatterDeployed(
 - `error AllowanceExceeded(uint256 remaining, uint256 requested);`
 - `error AlreadyUsed(bytes32 proposalId);`
 - `error ZeroAddress();`
+- `error ProposalsPaused();`
+- `error WithdrawalsPaused();`
+- `error SafeExecutionFailed(bytes returnData);`
+- `error ERC20TransferReturnedFalse(address token, bytes returnData);`
 
 ---
 
-## 9) Safe + AllowanceModule Wiring (runbook)
+## 9) Safe Module Wiring (runbook)
 
 One‑time setup (DAO owners on the Safe):
 
-1) Enable the AllowanceModule on the Safe (UI or programmatically).
-2) Add Proposal Hatter as a delegate and set spending limits for it:
-   - For each asset (ETH and specific ERC‑20s), set a limit (one‑time or periodic) large enough for near‑term operations.
-   - Automate top‑ups as part of DAO ops cadence if desired.
-3) (Optional) Attach Zodiac Roles Modifier to the Safe to further constrain which modules/selectors are callable.
+1) Enable ProposalHatter as a module on the Safe (UI or programmatically). Safe version: v1.4.1.
 
 During operation:
 
-- Executing a proposal in Proposal Hatter increments internal allowances; it does not auto‑change Safe module limits.
-- Withdrawals call the AllowanceModule to move funds from the Safe. If a Safe module limit is lower than Proposal Hatter's internal ledger for that token, the module will revert and the allowance change will be rolled back—ops should raise the module limit as needed.
+- Executing a proposal in Proposal Hatter increments internal allowances; it does not affect Safe owner settings.
+- Withdrawals call the Safe via `execTransactionFromModuleReturnData`. If a withdrawal fails at the token or ETH transfer layer, the transaction reverts and the internal ledger rollback is preserved.
+- If the DAO migrates the Safe, the owner can update the target via `setFundingSource(newSafe, _)`. Future withdrawals use the new address; existing proposals and internal ledger are unchanged.
 
-Audits / Lindy:
-
-- Safe core and the AllowanceModule have public audits and ongoing bug bounties.
 
 ---
 
 ## 10) Security Considerations
 
-- Two layers of limit: Proposal Hatter’s governance‑canonical ledger + Safe’s module limit. Either can stop a withdrawal; both must allow it.
-- Compromise model: If Proposal Hatter is compromised, module limits cap outflows; keep them “as low as practical” and top‑up operationally.
-- Reentrancy: Guard `execute` and `withdraw` (`nonReentrant`, CEI).
-- External calls: Only two: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) AllowanceModule in `withdraw` via `executeAllowanceTransfer`. Revert on failure. For AllowanceModule, an empty signature uses `msg.sender` as signer; ensure Proposal Hatter is the configured delegate.
-- Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol, or reduce/disable the Safe’s module limits to freeze payouts immediately.
+- Withdrawal execution surface: ProposalHatter performs Safe module calls with `Enum.Operation.Call` only; no delegatecalls.
+- ERC‑20 success handling: Accepts no‑return tokens and requires `true` when a boolean is returned. Non‑standard tokens may still misbehave; governance SHOULD prefer standard ERC‑20s for treasury.
+- Permissions: Safe owners can remove/disable ProposalHatter as a module to halt withdrawals immediately.
+- Reentrancy: Guard `execute` and `withdraw` (`nonReentrant`, CEI). Safe’s module call is the last interaction in `withdraw`.
+- External calls: (a) Hats Protocol in `execute` via `IHats.multicall`, (b) Safe module call in `withdraw` via `execTransactionFromModuleReturnData`. Revert on failure. 
+- Revocation halts system: DAO can revoke Proposer/Approver/Executor Hats in Hats Protocol and/or disable the Safe module to freeze payouts immediately.
 
 ---
 
@@ -434,13 +500,14 @@ Escalation / Cancel / Defeat
 Withdrawals
 
 - Non‑wearer cannot withdraw.
-- Wearer withdraw ≤ remaining → Proposal Hatter decrements and module transfer succeeds.
+- Wearer withdraw ≤ remaining → Proposal Hatter decrements and Safe module call succeeds.
 - Wearer withdraw > remaining → `AllowanceExceeded`.
-- Module failure (e.g., mocked revert) → bubbles up original error and ledger is reverted.
+- Safe module failure (e.g., ETH transfer revert, token revert) → revert `SafeExecutionFailed` (with return data) and ledger is reverted.
 
-Module limit interaction
+ERC‑20 return handling
 
-- Simulate module cap lower than Proposal Hatter’s ledger → transfer hits module cap and fails; further transfers must wait for ops to increase module limit.
+- Token returns no data → treated as success.
+- Token returns boolean `false` → revert `ERC20TransferReturnedFalse`.
 
 Reentrancy
 
@@ -449,139 +516,9 @@ Reentrancy
 
 ---
 
-## 12) Reference pseudocode (selected)
-
-```solidity
-function propose(...) external returns (bytes32 id) {
-  if (!Hats.isWearerOfHat(msg.sender, proposerHatId)) revert NotAuthorized();
-  bytes32 hatsHash = keccak256(hatsMulticall);
-  id = keccak256(abi.encode(block.chainid, address(this), HATS_PROTOCOL_ADDRESS,
-                            hatsHash, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), salt));
-  if (proposals[id].state != ProposalState.None) revert AlreadyUsed(id);
-
-  // Create per-proposal approver ticket hat under approverBranchId (details = proposalId)
-  uint256 approverHatId = IHats(HATS_PROTOCOL_ADDRESS).createHat(
-    approverBranchId,
-    Strings.toHexString(id),
-    1,
-    EMPTY_SENTINEL,
-    EMPTY_SENTINEL,
-    true,
-    ""
-  );
-
-  // Optionally create reserved branch hat with exact id = reservedHatId (details = proposalId)
-  uint256 reservedHatId = 0;
-  if (inputReservedHatId != 0) {
-    // derive parent id from the input hat id
-    uint256 parent = parentOf(inputReservedHatId);
-    // must be the next child to prevent index races
-    if (IHats(HATS_PROTOCOL_ADDRESS).getNextId(parent) != inputReservedHatId) revert InvalidReservedHatId();
-    // if opsBranchId is set, require parent is a descendant of opsBranchId
-    if (opsBranchId != 0 && !isDescendant(parent, opsBranchId)) revert InvalidReservedHatBranch();
-    // create the reserved hat under its parent
-    reservedHatId = IHats(HATS_PROTOCOL_ADDRESS).createHat(
-      parent,
-      Strings.toHexString(id),
-      1,
-      EMPTY_SENTINEL,
-      EMPTY_SENTINEL,
-      true,
-      ""
-    );
-    // sanity: ensure returned id matches input
-    assert(reservedHatId == inputReservedHatId);
-  }
-
-  proposals[id] = ProposalData({
-    submitter: msg.sender,
-    fundingAmount: fundingAmount,
-    state: ProposalState.Active,
-    fundingToken: fundingToken,
-    eta: 0,
-    timelockSec: timelockSec,
-    recipientHatId: recipientHatId,
-    approverHatId: approverHatId,
-    reservedHatId: reservedHatId,
-    hatsMulticall: hatsMulticall
-  });
-
-  bytes32 hatsMulticallHash = keccak256(hatsMulticall);
-  emit Proposed(id, hatsMulticallHash, msg.sender, recipientHatId, fundingToken, fundingAmount, uint32(timelockSec), approverHatId, reservedHatId, salt);
-}
-
-function execute(bytes32 id) external nonReentrant {
-  ProposalData storage p = proposals[id];
-  // checks
-  if (p.state != ProposalState.Succeeded) revert InvalidState(p.state);
-  if (block.timestamp < p.eta) revert TooEarly(uint64(p.eta), uint64(block.timestamp));
-  if (executorHatId != PUBLIC_SENTINEL && !Hats.isWearerOfHat(msg.sender, executorHatId)) revert NotAuthorized();
-  
-  // effects
-  uint88 currentAllowance = allowanceRemaining[p.recipientHatId][p.fundingToken];
-  uint88 newAllowance = currentAllowance + p.fundingAmount;
-  allowanceRemaining[p.recipientHatId][p.fundingToken] = newAllowance;
-  p.state = ProposalState.Executed;
-
-  // interactions
-  if (p.hatsMulticall.length > 0) {
-    IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall);
-  }
-
-  emit Executed(id, p.recipientHatId, p.fundingToken, p.fundingAmount, newAllowance);
-}
-
-function withdraw(uint256 recipientHatId, address token, uint88 amount)
-  external nonReentrant
-{
-  // checks
-  if (!Hats.isWearerOfHat(msg.sender, recipientHatId)) revert NotAuthorized();
-  uint88 rem = allowanceRemaining[recipientHatId][token];
-  if (rem < amount) revert AllowanceExceeded(rem, amount);
-
-  // effects
-  uint88 newAllowance = rem - amount;
-  allowanceRemaining[recipientHatId][token] = newAllowance;
-
-  // interactions: call AllowanceModule to move funds from Safe to msg.sender
-  // Signature: executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)
-  // Use delegate = address(this) and signature = empty bytes to authorize as the configured delegate
-  // Any revert from the module will bubble up and revert the entire transaction
-  AllowanceModule(allowanceModule).executeAllowanceTransfer(
-    safe,
-    token,
-    msg.sender,
-    uint96(amount),
-    address(0),
-    0,
-    address(this),
-    bytes("")
-  );
-
-  emit AllowanceConsumed(recipientHatId, token, amount, newAllowance, msg.sender);
-}
-
-// Constructor (summary)
-// constructor(
-//   address hatsProtocol,
-//   address safe_,
-//   address allowanceModule_,
-//   uint256 proposer,
-//   uint256 executor,
-//   uint256 escalator,
-//   uint256 approverBranchId_,
-//   uint256 opsBranchId_,
-// ) { ... }
-// - Sets immutable HATS_PROTOCOL_ADDRESS = hatsProtocol
-// - Sets safe = safe_ and allowanceModule = allowanceModule_
-// - Sets immutable role hat IDs (no global Approver) and immutable branch ids to the provided values
-```
-
-> Module call signature fixed in this spec: `executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)`.
-
 ---
 
-## 13) Non‑goals (v1)
+## 12) Non‑goals (v1)
 
 - Policy tiers, Reality‑based challenges, per‑epoch program budgets, stream/drip schedules (can be layered later without changing the Safe wiring).
 - Auto‑provisioning Safe module limits from Proposal Hatter (module limits are owner‑set per Safe UX/API).
