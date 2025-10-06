@@ -17,10 +17,11 @@ interface IProposalHatterTypes {
   /// @dev Storage-optimized struct (5 slots + dynamic bytes):
   /// Slot 0: submitter (20) + fundingAmount (11) + state (1) = 32 bytes
   /// Slot 1: fundingToken (20) + eta (8) + timelockSec (4) = 32 bytes
-  /// Slot 2: recipientHatId (32 bytes)
-  /// Slot 3: approverHatId (32 bytes)
-  /// Slot 4: reservedHatId (32 bytes)
-  /// Slot 5+: hatsMulticall (dynamic)
+  /// Slot 2: safe (20)
+  /// Slot 3: recipientHatId (32 bytes)
+  /// Slot 4: approverHatId (32 bytes)
+  /// Slot 5: reservedHatId (32 bytes)
+  /// Slot 6: hatsMulticall (dynamic)
   struct ProposalData {
     address submitter; // 20 bytes
     uint88 fundingAmount; // 11 bytes
@@ -28,6 +29,7 @@ interface IProposalHatterTypes {
     address fundingToken; // 20 bytes
     uint64 eta; // 8 bytes (queue time: now + timelockSec)
     uint32 timelockSec; // 4 bytes (per-proposal delay; 0 = none)
+    address safe; // 20 bytes
     uint256 recipientHatId; // 32 bytes
     uint256 approverHatId; // 32 bytes
     uint256 reservedHatId; // 32 bytes (0 if none)
@@ -63,6 +65,7 @@ interface IProposalHatterEvents is IProposalHatterTypes {
     uint256 fundingAmount,
     address fundingToken,
     uint32 timelockSec,
+    address safe,
     uint256 recipientHatId,
     uint256 approverHatId,
     uint256 reservedHatId,
@@ -183,17 +186,21 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
 
   /// @notice Compute proposalId for given inputs (for pre-call checks/UI display).
   /// @dev Includes `msg.sender` in the hash to prevent front-running by other submitters.
+  /// @param submitter The address that proposed.
   /// @param fundingAmount Funding amount to be added on execution.
   /// @param fundingToken Token address (address(0) for ETH).
   /// @param timelockSec Delay in seconds.
+  /// @param safe The Safe for which this allowance is valid.
   /// @param recipientHatId Recipient hat ID.
   /// @param hatsMulticall ABI-encoded `bytes[]` for `IMulticallable.multicall`.
   /// @param salt Optional salt.
   /// @return proposalId The deterministic proposal id for the calling address.
   function computeProposalId(
+    address submitter,
     uint88 fundingAmount,
     address fundingToken,
     uint32 timelockSec,
+    address safe,
     uint256 recipientHatId,
     bytes calldata hatsMulticall,
     bytes32 salt
@@ -208,6 +215,7 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
   /// @return fundingToken Token to fund (address(0) for ETH).
   /// @return eta Execution unlock timestamp.
   /// @return timelockSec Per-proposal timelock seconds.
+  /// @return safe The Safe for which this allowance is valid.
   /// @return recipientHatId Hat ID allowed to withdraw.
   /// @return approverHatId Approver hat ID.
   /// @return reservedHatId Reserved hat ID.
@@ -222,11 +230,17 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
       address fundingToken,
       uint64 eta,
       uint32 timelockSec,
+      address safe,
       uint256 recipientHatId,
       uint256 approverHatId,
       uint256 reservedHatId,
       bytes memory hatsMulticall
     );
+
+  /// @notice Get the state of a proposal.
+  /// @param proposalId The proposal id.
+  /// @return state The state of the proposal.
+  function getProposalState(bytes32 proposalId) external view returns (ProposalState);
 
   /// forge-lint: disable-start(mixed-case-function)
 
@@ -266,5 +280,7 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
   function setProposerHat(uint256 hatId) external;
   function setEscalatorHat(uint256 hatId) external;
   function setExecutorHat(uint256 hatId) external;
+
+  /// @notice The DAO Safe that custodians funds. Settable by owner, applied to future proposals.
   function setSafe(address safe) external;
 }

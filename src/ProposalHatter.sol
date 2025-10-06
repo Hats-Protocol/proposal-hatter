@@ -22,9 +22,31 @@ import { Enum } from "../lib/safe-smart-account/contracts/common/Enum.sol";
 /// @dev This implementation assumes all relevant hats live within a single Hats tree branch.
 /// Linked tree topologies are not supported; branch membership checks rely on
 /// local-level hat utilities and will not traverse linkedTreeAdmins.
-/// Operationally, the contract MUST wear (or be the admin of) both the `approverBranchId` and
-/// `opsBranchId` hats so it can create per-proposal hats and toggle reserved hats during
-/// cancellation or rejection flows.
+///
+/// OPERATIONAL ASSUMPTIONS (must be satisfied and maintained during operation):
+/// 1. ProposalHatter MUST be an admin of `APPROVER_BRANCH_ID` to create per-proposal approver ticket hats
+/// 2. ProposalHatter MUST be an admin of `OPS_BRANCH_ID` (if configured) to create and toggle reserved hats
+/// 3. ProposalHatter MUST be enabled as a module on the Safe to execute withdrawals
+/// 4. The provided `APPROVER_BRANCH_ID` and `OPS_BRANCH_ID` (if non-zero) MUST be valid, existing hat IDs
+/// 5. Role hat IDs (`proposerHat`, `executorHat`, `escalatorHat`) MUST be valid when set, or operations will fail
+/// 6. If ProposalHatter loses admin rights over branch IDs, proposal creation and hat toggling will fail
+/// 7. If Safe owners disable ProposalHatter as a module, withdrawals will fail (allowances remain intact)
+///
+/// ALLOWANCE CONSTRAINTS (uint88 type limits):
+/// - Maximum allowance per (safe, recipientHat, token): type(uint88).max = ~3.09 × 10^26 wei
+/// - For 18-decimal tokens (ETH, DAI): ~309 million tokens maximum
+/// - For 6-decimal tokens (USDC, USDT): ~309 quadrillion tokens maximum
+/// - Cumulative allowances across multiple proposals to the same recipient can accumulate
+/// - If total allowance would exceed type(uint88).max, execute() reverts (protective, not exploitable)
+/// - This limit is sufficient for all realistic DAO treasury operations
+///
+/// SECURITY PROPERTIES:
+/// - Each proposal's allowance is bound to the Safe address at proposal-time (stored in ProposalData.safe)
+/// - Changing the global `safe` via setSafe() does NOT affect existing proposal allowances
+/// - Withdrawals require exact Safe parameter match to allowance ledger (multi-Safe support)
+/// - Front-running prevention: proposalId includes submitter address, chainid, and this contract address
+/// - Atomicity: Hats multicall failure reverts entire execution; no partial allowance grants
+/// - Reentrancy protection on execute() and withdraw() via nonReentrant modifier
 contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   // --------------------
   // Internal Constants
@@ -139,8 +161,13 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Only callable by the Proposer
     _checkAuth(proposerHat);
 
+    // Get the Safe address
+    address safe_ = safe;
+
     // Compute the proposal ID
-    proposalId = _computeProposalId(fundingAmount_, fundingToken_, timelockSec_, recipientHatId_, hatsMulticall, salt);
+    proposalId = _computeProposalId(
+      msg.sender, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticall, salt
+    );
 
     // New proposals must be unique
     if (proposals[proposalId].state != IProposalHatterTypes.ProposalState.None) {
@@ -163,6 +190,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       fundingToken: fundingToken_,
       eta: 0,
       timelockSec: timelockSec_,
+      safe: safe_,
       recipientHatId: recipientHatId_,
       approverHatId: approverHatId_,
       reservedHatId: reservedHatId_,
@@ -177,6 +205,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       fundingAmount_,
       fundingToken_,
       timelockSec_,
+      safe_,
       recipientHatId_,
       approverHatId_,
       reservedHatId_,
@@ -353,7 +382,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     }
 
     // Execute the transfer from the Safe, reverting if it fails.
-    _execTransferFromSafe(token, amount);
+    _execTransferFromSafe(safe_, token, amount);
 
     // Log the allowance consumption
     emit IProposalHatterEvents.AllowanceConsumed(recipientHatId_, safe_, token, amount, newAllowance, msg.sender);
@@ -449,14 +478,23 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
   /// @inheritdoc IProposalHatter
   function computeProposalId(
+    address submitter_,
     uint88 fundingAmount_,
     address fundingToken_,
     uint32 timelockSec_,
+    address safe_,
     uint256 recipientHatId_,
     bytes calldata hatsMulticall,
     bytes32 salt
   ) external view returns (bytes32) {
-    return _computeProposalId(fundingAmount_, fundingToken_, timelockSec_, recipientHatId_, hatsMulticall, salt);
+    return _computeProposalId(
+      submitter_, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticall, salt
+    );
+  }
+
+  /// @inheritdoc IProposalHatter
+  function getProposalState(bytes32 proposalId) external view returns (IProposalHatterTypes.ProposalState) {
+    return proposals[proposalId].state;
   }
 
   // --------------------
@@ -484,16 +522,20 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   }
 
   /// @dev Internal helper to compute the deterministic proposalId for the current caller.
+  /// @param submitter_ The address that proposed.
   /// @param hatsMulticall ABI-encoded bytes[] for IMulticallable.multicall.
   /// @param fundingAmount_ Funding amount to approve on execute.
   /// @param fundingToken_ Token address (address(0) for ETH).
   /// @param timelockSec_ Per-proposal delay in seconds.
+  /// @param safe_ The Safe for which this allowance is valid.
   /// @param recipientHatId_ Recipient hat ID.
   /// @param salt Optional salt for de-duplication.
   function _computeProposalId(
+    address submitter_,
     uint88 fundingAmount_,
     address fundingToken_,
     uint32 timelockSec_,
+    address safe_,
     uint256 recipientHatId_,
     bytes calldata hatsMulticall,
     bytes32 salt
@@ -506,10 +548,11 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       bytes32(block.chainid),
       bytes32(uint256(uint160(address(this)))),
       bytes32(uint256(uint160(HATS_PROTOCOL_ADDRESS))),
-      bytes32(uint256(uint160(msg.sender))),
+      bytes32(uint256(uint160(submitter_))),
       bytes32(uint256(fundingAmount_)),
       bytes32(uint256(uint160(fundingToken_))),
       bytes32(uint256(timelockSec_)),
+      bytes32(uint256(uint160(safe_))),
       bytes32(recipientHatId_),
       multicallHash,
       salt
@@ -545,7 +588,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   function _execute(IProposalHatter.ProposalData storage p, bytes32 proposalId) internal {
     // Effects
     // Increase internal allowance ledger
-    address safe_ = safe;
+    address safe_ = p.safe;
     uint88 current = _allowanceRemaining[safe_][p.recipientHatId][p.fundingToken];
     uint88 newAllowance = current + p.fundingAmount; // reverts on overflow in ^0.8
     _allowanceRemaining[safe_][p.recipientHatId][p.fundingToken] = newAllowance;
@@ -553,10 +596,16 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Advance the proposal state to Executed
     p.state = IProposalHatterTypes.ProposalState.Executed;
 
+    // Load the hats multicall into memory
+    bytes memory hatsMulticall = p.hatsMulticall;
+
     // Interactions: execute Hats Protocol multicall (skip if funding-only)
-    if (p.hatsMulticall.length > 0) {
+    if (hatsMulticall.length > 0) {
+      // Delete the hats multicall from storage for some gas savings
+      delete p.hatsMulticall;
+
       // Decode stored bytes into bytes[] expected by Multicallable
-      bytes[] memory calls = abi.decode(p.hatsMulticall, (bytes[]));
+      bytes[] memory calls = abi.decode(hatsMulticall, (bytes[]));
       // Execute the multicall. If Hats reverts, the entire tx reverts (atomicity)
       IMulticallable(HATS_PROTOCOL_ADDRESS).multicall(calls);
     }
@@ -579,9 +628,10 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
   /// @dev Internal helper to execute an ETH or ERC20 transfer from the Safe to the caller. This contract must be an
   /// enabled module on the Safe. Follows the OpenZeppelin SafeERC20 library patterns for Safe ERC20 transfers.
+  /// @param safe_ The Safe to transfer from.
   /// @param token The token to transfer (address(0) for ETH)
   /// @param amount The amount to transfer
-  function _execTransferFromSafe(address token, uint256 amount) internal {
+  function _execTransferFromSafe(address safe_, address token, uint256 amount) internal {
     address to;
     uint256 value;
     bytes memory data;
@@ -602,19 +652,12 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Try the Safe module call, reverting if it fails, following the OpenZeppelin SafeERC20 library patterns for ERC20
     // transfers.
     (bool success, bytes memory ret) =
-      ModuleManager(safe).execTransactionFromModuleReturnData(to, value, data, Enum.Operation.Call);
+      ModuleManager(safe_).execTransactionFromModuleReturnData(to, value, data, Enum.Operation.Call);
     if (!success) revert IProposalHatterErrors.SafeExecutionFailed(ret);
     // Assume success if return data is empty, and revert if the return data is malformed or false
     if (token != address(0) && ret.length > 0) {
       if (ret.length != 32) revert IProposalHatterErrors.ERC20TransferMalformedReturn(token, ret);
       if (abi.decode(ret, (bool)) != true) revert IProposalHatterErrors.ERC20TransferReturnedFalse(token, ret);
     }
-
-    // if (token != address(0) && ret.length > 0) {
-    // // Check the return data manually
-    // uint256 uintRet = uint256(bytes32(ret));
-    // // Revert if the return data is not true
-    // if (uintRet != 1) revert IProposalHatter.ERC20TransferReturnedFalse(token, ret);
-    // }
   }
 }
