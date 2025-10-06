@@ -1,8 +1,8 @@
 # ProposalHatter.sol — Functional Specification
 
-Status: Draft v1.6
+Status: Draft v1.7
 
-Date: 2025-10-02
+Date: 2025-10-06
 
 Author: Spencer
 
@@ -81,14 +81,14 @@ Sentinels
 
 Inputs defining a proposal:
 
-- `hatsMulticall`: `bytes` (exact payload for Hats Protocol)
-- `recipientHatId`: `uint256`
+- `fundingAmount`: `uint88`
 - `fundingToken`: `address` (ERC‑20 or ETH sentinel `address(0)`)
-- `fundingAmount`: `uint256`
 - `timelockSec`: `uint64` (0 = no timelock)
-- `submitter`: `address` (caller of `propose`)
+- `recipientHatId`: `uint256`
 - `reservedHatId`: `uint256` (optional; if non‑zero, this exact hat id is created at propose‑time; its parent must be a descendant of `opsBranchId` when `opsBranchId != 0`)
+- `hatsMulticall`: `bytes` (exact payload for Hats Protocol)
 - `salt`: `bytes32` (optional; differentiate repeated proposals with identical parameters)
+- `submitter`: `address` (caller of `propose`)
 
 Deterministic IDs (global de‑duplication):
 
@@ -99,11 +99,12 @@ proposalId = keccak256(
     block.chainid,
     address(this),
     HATS_PROTOCOL_ADDRESS,
-    hatsMulticallHash,
-    recipientHatId,
-    fundingToken,
+    submitter,
     fundingAmount,
+    fundingToken,
     timelockSec,
+    recipientHatId,
+    hatsMulticallHash,
     salt
   )
 );
@@ -111,16 +112,17 @@ proposalId = keccak256(
 
 Notes:
 
-- Per-salt de‑duplication: `proposalId` excludes `submitter` but includes `salt`. Proposing identical inputs with the same salt yields the same `proposalId` and must be unused; changing the salt creates a new `proposalId` for an otherwise identical payload.
+- Per-salt de-duplication: For a given submitter, proposing identical inputs with the same salt yields the same `proposalId` and must be unused; changing the salt creates a new `proposalId` for an otherwise identical payload. Different submitters always derive different `proposalId`s, preventing front-running with borrowed calldata.
 - `salt` is optional (e.g., `0x00`) and is emitted for provenance.
 - Full `hatsMulticall` calldata is persisted alongside each proposal for first-party UIs; integrity checks compare supplied calldata to the stored bytes.
 - Helper: `computeProposalId(...)` (see Interface) mirrors this hashing logic on-chain for UI/explorer consumption. Implementations may pre-hash `hatsMulticall` for efficiency; the canonical definition binds the hash of `hatsMulticall`.
+- Field ordering mirrors the stored `ProposalData` where applicable: submitter, fundingAmount, fundingToken, timelockSec, recipientHatId, hatsMulticall.
 - Note: `reservedHatId` (if created) is not included in the `proposalId` hash derivation.
 
 ### 3.2 Storage
 
 ```
-enum ProposalState { None, Active, Succeeded, Escalated, Canceled, Defeated, Executed }
+enum ProposalState { None, Active, Approved, Escalated, Canceled, Rejected, Executed }
 // Mirrors OpenZeppelin Governor states where applicable; Escalated is Proposal Hatter-specific.
 
 // Storage-optimized struct (5 slots + dynamic bytes):
@@ -145,12 +147,12 @@ struct ProposalData {
 
 mapping(bytes32 => ProposalData) public proposals;
 
-// Internal, canonical allowance ledger (monotonic via execute(+), withdraw(-); no admin adjustments).
-mapping(uint256 /*hatId*/ => mapping(address /*token*/ => uint88)) public allowanceRemaining;
+// Internal, canonical allowance ledger (monotonic via execute(+), withdraw(-); surfaced via allowanceOf).
+mapping(address safe => mapping(uint256 /*hatId*/ => mapping(address /*token*/ => uint88))) internal _allowanceRemaining;
 
 // External integration addresses / roles:
 address public immutable HATS_PROTOCOL_ADDRESS;   // fixed at deploy
-ISafe public vault;                              // DAO’s Vault (Safe) address (owner‑settable)
+address public safe;                              // DAO’s Vault (Safe) address (owner‑settable)
 
 uint256 public immutable ownerHatId;              // fixed at deploy (owner = wearer)
 uint256 public proposerHatId;                     // owner‑settable
@@ -174,12 +176,12 @@ Proposal Hatter’s own allowance ledger is authoritative for governance. Funds 
 ```
 // ---- Lifecycle ----
 function propose(
-  bytes   calldata hatsMulticall,
-  uint256 recipientHatId,
-  address fundingToken,
   uint88  fundingAmount, // optimized for storage packing
+  address fundingToken,
   uint32  timelockSec,   // 0 = no timelock
+  uint256 recipientHatId,
   uint256 reservedHatId, // 0 = no reserved hat
+  bytes   calldata hatsMulticall,
   bytes32 salt           // optional salt for replaying identical payloads
 ) external returns (bytes32 proposalId);  // Proposer Hat
 
@@ -197,19 +199,20 @@ function cancel(bytes32 proposalId) external;            // proposal submitter
 // ---- Funding pull (via Safe Module) ----
 function withdraw(
   uint256 recipientHatId,
+  address safe,
   address token,
   uint88  amount  // optimized for storage packing
 ) external;  // caller must wear recipientHatId; funds sent to msg.sender
 
-function allowanceOf(uint256 hatId, address token) external view returns (uint88);
+function allowanceOf(address safe, uint256 hatId, address token) external view returns (uint88);
 function computeProposalId(
-  bytes calldata hatsMulticall,
-  uint256 recipientHatId,
-  address fundingToken,
   uint88 fundingAmount,  // optimized for storage packing
+  address fundingToken,
   uint32 timelockSec,
+  uint256 recipientHatId,
+  bytes calldata hatsMulticall,
   bytes32 salt
-) external view returns (bytes32);
+) external view returns (bytes32);  // Uses msg.sender as the submitter for hashing
 
 // ---- Admin (Owner Hat required) ----
 function pauseProposals(bool paused) external;      // Emits ProposalsPaused(paused)
@@ -218,7 +221,7 @@ function pauseWithdrawals(bool paused) external;    // Emits WithdrawalsPaused(p
 function setProposerHat(uint256 hatId) external;    // Emits ProposerHatSet(hatId)
 function setEscalatorHat(uint256 hatId) external;   // Emits EscalatorHatSet(hatId)
 function setExecutorHat(uint256 hatId) external;    // Emits ExecutorHatSet(hatId); hatId==PUBLIC_SENTINEL enables public execution
-function setFundingSource(address safe, address allowanceModule) external; // Emits FundingSourceSet(safe, allowanceModule)
+function setSafe(address safe) external; // Emits SafeSet(safe)
 
 // ---- Views ----
 function OWNER_HAT() external view returns (uint256);
@@ -233,7 +236,7 @@ function withdrawalsPaused() external view returns (bool);
 ### 5.1 propose(...) — Proposer Hat
 
 - Requires `isWearerOfHat(msg.sender, proposerHatId)`.
-- Reverts `ProposalsPaused()` if proposals are paused.
+- Reverts `ProposalsArePaused()` if proposals are paused.
 - Allows `hatsMulticall.length == 0` for funding‑only proposals.
 - Computes `proposalId` (per-salt de‑dup) and requires it is unused.
 - Creates a per‑proposal Approver Ticket Hat under `approverBranchId` with params: `details = string(proposalId)`, `maxSupply = 1`, `eligibility = EMPTY_SENTINEL`, `toggle = EMPTY_SENTINEL`, `mutable = true`; stores returned `approverHatId`. The hat is not minted by this contract.
@@ -244,45 +247,45 @@ function withdrawalsPaused() external view returns (bool);
   - Call `createHat(parent, details=string(proposalId), maxSupply=1, eligibility=EMPTY_SENTINEL, toggle=EMPTY_SENTINEL, mutable=true, imageURI="")`.
   - Do not mint this hat.
 - Stores `ProposalData{ submitter=msg.sender, fundingAmount, state=ProposalState.Active, fundingToken, eta=0, timelockSec, recipientHatId, approverHatId, reservedHatId, hatsMulticall }` (fields ordered for optimal storage packing).
-- Event (indexed): `Proposed(proposalId, hatsMulticallHash, submitter, recipientHatId, fundingToken, fundingAmount, timelockSec, approverHatId, reservedHatId, salt)`. The `hatsMulticallHash` (keccak256 of the multicall bytes) is emitted for off-chain verification.
-- Note: UIs may invoke `computeProposalId` pre-call to verify or display the ID that will be emitted. `reservedHatId` is not included in the hash.
+- Event: `Proposed(proposalId, hatsMulticallHash, submitter, fundingAmount, fundingToken, timelockSec, recipientHatId, approverHatId, reservedHatId, salt)`. The `hatsMulticallHash` (keccak256 of the multicall bytes) is emitted for off-chain verification.
+- Note: UIs may invoke `computeProposalId` pre-call to verify or display the ID that will be emitted, but they must call from the same address that will submit the proposal. `reservedHatId` is not included in the hash.
 
 ### 5.2 approve(proposalId) — Approver Ticket Hat
 
-- Reverts `ProposalsPaused()` if proposals are paused.
+- Reverts `ProposalsArePaused()` if proposals are paused.
 - Requires caller wears this proposal's `approverHatId`.
 - Requires current `state == ProposalState.Active`.
-- Sets `eta = now + timelockSec` (uses stored per‑proposal `timelockSec`); sets `state = ProposalState.Succeeded` (proposal succeeded and awaits ETA).
-- Event: `Succeeded(proposalId, msg.sender, eta)`.
+- Sets `eta = now + timelockSec` (uses stored per‑proposal `timelockSec`); sets `state = ProposalState.Approved` (proposal approved and awaits ETA).
+- Event: `Approved(proposalId, msg.sender, eta)`.
 
 ### 5.3 execute(proposalId) — Public / Executor Hat optional
 
-- Reverts `ProposalsPaused()` if proposals are paused.
-- Requires `state == ProposalState.Succeeded` and `now >= eta`.
-- Requires not previously `Escalated`, `Canceled`, or `Defeated` (state-machine: only `ProposalState.Succeeded` may proceed).
+- Reverts `ProposalsArePaused()` if proposals are paused.
+- Requires `state == ProposalState.Approved` and `now >= eta`.
+- Requires not previously `Escalated`, `Canceled`, or `Rejected` (state-machine: only `ProposalState.Approved` may proceed).
 - If `executorHatId != PUBLIC_SENTINEL`, caller must wear Executor Hat.
 - Effects (before external calls, per CEI pattern):
-  - Increase Proposal Hatter's internal ledger with overflow protection: check that `allowanceRemaining[recipientHatId][fundingToken] + fundingAmount` does not overflow, then `allowanceRemaining[recipientHatId][fundingToken] += fundingAmount`.
-  - This path is the sole mechanism that increases internal allowances.
+  - Increase Proposal Hatter's internal ledger with overflow protection: check that `_allowanceRemaining[safe][recipientHatId][fundingToken] + fundingAmount` does not overflow, then `_allowanceRemaining[safe][recipientHatId][fundingToken] += fundingAmount`.
+  - This path is the sole mechanism that increases internal allowances (surfaced via `allowanceOf`).
   - Set state `ProposalState.Executed`.
 - Interactions:
   - If `p.hatsMulticall.length > 0`, performs `IHats(HATS_PROTOCOL_ADDRESS).multicall(p.hatsMulticall)` (revert on failure). If `p.hatsMulticall.length == 0`, skip the Hats call (funding‑only proposal).
-  - Events: `Executed(proposalId, recipientHatId, fundingToken, fundingAmount, allowanceRemaining[recipientHatId][fundingToken])`.
+  - Events: `Executed(proposalId, recipientHatId, safe, fundingToken, fundingAmount, _allowanceRemaining[safe][recipientHatId][fundingToken])`.
 - nonReentrant: reentrancy guard prevents reentry across the external call.
 
 ### 5.4 approveAndExecute(proposalId) — Approver Ticket Hat (+ Executor Hat if set)
 
-- Reverts `ProposalsPaused()` if proposals are paused.
+- Reverts `ProposalsArePaused()` if proposals are paused.
 - Convenience path to approve and execute an existing proposal in a single call when `timelockSec == 0`.
 - Requires caller wears this proposal's `approverHatId`.
 - If `executorHatId != PUBLIC_SENTINEL`, caller must also wear the Executor Hat.
 - Requires current `state == ProposalState.Active` and stored `timelockSec == 0`.
-- Sets `eta = now`, sets `state = ProposalState.Succeeded`, emits `Succeeded`, then runs `execute(proposalId)`.
-- Emits `Succeeded` and`Executed` (no `Proposed`, since the proposal already exists).
+- Sets `eta = now`, sets `state = ProposalState.Approved`, emits `Approved`, then runs the same execute semantics as `execute(proposalId)`.
+- Emits `Approved` and `Executed` (no `Proposed`, since the proposal already exists).
 
 ### 5.5 escalate(proposalId) — Escalator Hat
 
-- Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Succeeded`} and before execution.
+- Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Approved`} and before execution.
 - Sets state `ProposalState.Escalated`.
 - Event: `Escalated(proposalId, msg.sender)`.
 - Effect: An `Escalated` proposal cannot be executed by Proposal Hatter; the DAO may proceed via its own governance paths outside Proposal Hatter if desired.
@@ -290,7 +293,7 @@ function withdrawalsPaused() external view returns (bool);
 
 ### 5.6 cancel(proposalId) — proposal submitter
 
-- Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Succeeded`} anytime pre‑execution (no pre‑ETA restriction).
+- Allowed when state ∈ {`ProposalState.Active`, `ProposalState.Approved`} anytime pre‑execution (no pre‑ETA restriction).
 - Sets state `ProposalState.Canceled`.
 - Event: `Canceled(proposalId, by)`.
 - Cleanup: if `reservedHatId != 0`, set its toggle to `address(this)` via `Hats.changeHatToggle(reservedHatId, address(this))`, then deactivate via `Hats.setHatStatus(reservedHatId, false)`.
@@ -299,19 +302,19 @@ function withdrawalsPaused() external view returns (bool);
 
 - Requires caller wears this proposal's `approverHatId`.
 - Allowed when state == `ProposalState.Active`.
-- Sets state `ProposalState.Defeated`.
-- Event: `Defeated(proposalId, by)`.
-- Rationale: models a committee rejection akin to Governor’s `Defeated` outcome.
+- Sets state `ProposalState.Rejected`.
+- Event: `Rejected(proposalId, by)`.
+- Rationale: models a committee rejection akin to Governor’s `Rejected` outcome.
 - Cleanup: if `reservedHatId != 0`, set its toggle to `address(this)` via `Hats.changeHatToggle(reservedHatId, address(this))`, then deactivate via `Hats.setHatStatus(reservedHatId, false)`.
 
-### 5.8 withdraw(recipientHatId, token, amount) — Recipient Hat wearer
+### 5.8 withdraw(recipientHatId, safe, token, amount) — Recipient Hat wearer
 
-- Reverts `WithdrawalsPaused()` if withdrawals are paused.
+- Reverts `WithdrawalsArePaused()` if withdrawals are paused.
 - Checks:
   - Requires caller wears `recipientHatId`.
-  - Requires `allowanceRemaining[recipientHatId][token] >= amount`.
+  - Requires `_allowanceRemaining[safe][recipientHatId][token] >= amount`.
 - Effects (before external calls, per CEI pattern):
-  - Decrement internal allowance: `allowanceRemaining[recipientHatId][token] -= amount`.
+  - Decrement internal allowance: `_allowanceRemaining[safe][recipientHatId][token] -= amount`.
   - This pathway is the only mechanism that reduces internal allowances (outside of revert rollbacks).
 - Interactions:
   - Execute a Safe module transaction via `execTransactionFromModuleReturnData` (Safe v1.4.1, `Enum.Operation.Call` only):
@@ -321,7 +324,7 @@ function withdrawalsPaused() external view returns (bool);
     - If `returnData.length == 0`, accept (ERC‑20s that do not return a value).
     - Else decode as `bool ok` and require `ok == true`; otherwise revert `ERC20TransferReturnedFalse(token, returnData)`.
   - These patterns should follow the OpenZeppelin SafeERC20 library patterns (modified for the Safe module execution, of course).
-  - Event: `AllowanceConsumed(recipientHatId, token, amount, remaining, msg.sender)`.
+  - Event: `AllowanceConsumed(recipientHatId, safe, token, amount, remaining, msg.sender)`.
 - Emits the payout destination (msg.sender) for downstream auditing.
 - nonReentrant: reentrancy guard prevents reentry via token hooks or module callbacks.
 
@@ -335,12 +338,12 @@ Module call note (Safe 1.4.1): use `execTransactionFromModuleReturnData(address 
 - `pauseProposals(bool paused)`
   - Only owner (caller must wear `ownerHatId`).
   - Sets `proposalsPaused = paused` and emits `ProposalsPaused(paused)`.
-  - When paused, `propose`, `approve`, `approveAndExecute`, and `execute` revert with `ProposalsPaused()` for all callers (including the owner).
+  - When paused, `propose`, `approve`, `approveAndExecute`, and `execute` revert with `ProposalsArePaused()` for all callers (including the owner).
 
 - `pauseWithdrawals(bool paused)`
   - Only owner.
   - Sets `withdrawalsPaused = paused` and emits `WithdrawalsPaused(paused)`.
-  - When paused, `withdraw` reverts with `WithdrawalsPaused()` for all callers (including the owner).
+  - When paused, `withdraw` reverts with `WithdrawalsArePaused()` for all callers (including the owner).
 
 - `setProposerHat(uint256 hatId)`
   - Only owner. No branch constraints.
@@ -355,59 +358,53 @@ Module call note (Safe 1.4.1): use `execTransactionFromModuleReturnData(address 
   - Setting to `PUBLIC_SENTINEL` (1) enables public execution; otherwise execution requires this hat.
   - Sets `executorHatId = hatId` and emits `ExecutorHatSet(hatId)`.
 
-- `setFundingSource(address safe)`
+- `setSafe(address safe)`
   - Only owner. `safe` must be non‑zero or revert `ZeroAddress()`.  
-  - Updates `safe` and emits `FundingSourceSet(safe)`.
+  - Updates `safe` and emits `SafeSet(safe)`.
   - Takes effect immediately for future `withdraw` calls; proposals and internal ledger are unaffected.
 
 ---
 
-## 6) Events (all indexed)
+## 6) Events
 
 ```solidity
 event Proposed(
   bytes32 indexed proposalId,
   bytes32 indexed hatsMulticallHash,  // keccak256(hatsMulticall) for off-chain verification
   address indexed submitter,
-  uint256 recipientHatId,
-  address fundingToken,
   uint256 fundingAmount,
+  address fundingToken,
   uint32 timelockSec,
+  uint256 recipientHatId,
   uint256 approverHatId,
   uint256 reservedHatId,
   bytes32 salt
 );
 
-event Succeeded(bytes32 indexed proposalId, address indexed by, uint64 eta);
+event Approved(bytes32 indexed proposalId, address indexed by, uint64 eta);
 event Executed(
   bytes32 indexed proposalId,
   uint256 indexed recipientHatId,
-  address indexed fundingToken,
+  address indexed safe,
+  address fundingToken,
   uint256 fundingAmount,
   uint256 allowanceRemaining
 );
 
 event Escalated(bytes32 indexed proposalId, address indexed by);
 event Canceled(bytes32 indexed proposalId, address indexed by);
-event Defeated(bytes32 indexed proposalId, address indexed by);
+event Rejected(bytes32 indexed proposalId, address indexed by);
 
 event AllowanceConsumed(
   uint256 indexed recipientHatId,
+  address safe,
   address indexed token,
   uint256 amount,
   uint256 remaining,
   address indexed to  // always msg.sender
 );
 
-event ProposalHatterDeployed(
-  address hatsProtocol,
-  address indexed vault,
-  uint256 indexed proposerHatId,
-  uint256 executorHatId,
-  uint256 escalatorHatId,
-  uint256 approverBranchId,
-  uint256 opsBranchId
-);
+event ProposalHatterDeployed(address hatsProtocol, uint256 ownerHatId, uint256 approverBranchId, uint256 opsBranchId);
 
 // Admin + pause events
 event ProposalsPaused(bool paused);
@@ -415,7 +412,7 @@ event WithdrawalsPaused(bool paused);
 event ProposerHatSet(uint256 hatId);
 event EscalatorHatSet(uint256 hatId);
 event ExecutorHatSet(uint256 hatId);
-event FundingSourceSet(address vault);
+event SafeSet(address safe);
 
 ```
 
@@ -426,13 +423,13 @@ event FundingSourceSet(address vault);
 - Exact‑bytes execution: only the stored `hatsMulticall` bytes can be executed when present. Funding‑only proposals (empty `hatsMulticall`) execute without a Hats call.
 - Atomicity: if the Hats call fails, nothing changes (no funding approval).
 - Spend monotonicity and authority:
-  - `allowanceRemaining` increases only via successful `execute`.
-  - `allowanceRemaining` decreases only via `withdraw`.
+  - `_allowanceRemaining` increases only via successful `execute`.
+  - `_allowanceRemaining` decreases only via `withdraw`.
   - Maximum allowance per hat is `type(uint88).max` for storage optimization while maintaining sufficient range.
 - Treasury custody: decider trust zone (eg committee) has no access; Proposal Hatter is the only actor orchestrating transfers via the Safe module interface; Safe owners can disable/remove the module at any time.
-- Replay safety: `proposalId` binds chain, this contract, Hats Protocol target, payload bytes, recipient hat, token, amount, timelock, and salt. Identical inputs with the same salt are deduped; choosing a new salt permits a fresh proposal for the same payload.
-- State machine: No execution if state ∈ {`ProposalState.Escalated`, `ProposalState.Canceled`, `ProposalState.Defeated`, `ProposalState.Executed`}.
-- Pauses: when `proposalsPaused == true`, `propose`, `approve`, `approveAndExecute`, and `execute` revert with `ProposalsPaused()` for all callers (including the owner). When `withdrawalsPaused == true`, `withdraw` reverts with `WithdrawalsPaused()`. `escalate`, `reject`, and `cancel` remain callable.
+- Replay safety: `proposalId` binds chain, this contract, Hats Protocol target, payload bytes, recipient hat, token, amount, timelock, submitter, and salt. Identical inputs with the same salt are deduped per submitter; choosing a new salt permits a fresh proposal for the same payload.
+- State machine: No execution if state ∈ {`ProposalState.Escalated`, `ProposalState.Canceled`, `ProposalState.Rejected`, `ProposalState.Executed`}.
+- Pauses: when `proposalsPaused == true`, `propose`, `approve`, `approveAndExecute`, and `execute` revert with `ProposalsArePaused()` for all callers (including the owner). When `withdrawalsPaused == true`, `withdraw` reverts with `WithdrawalsArePaused()`. `escalate`, `reject`, and `cancel` remain callable.
 
 ---
 
@@ -444,10 +441,13 @@ event FundingSourceSet(address vault);
 - `error AllowanceExceeded(uint256 remaining, uint256 requested);`
 - `error AlreadyUsed(bytes32 proposalId);`
 - `error ZeroAddress();`
-- `error ProposalsPaused();`
-- `error WithdrawalsPaused();`
+- `error InvalidReservedHatId();`
+- `error InvalidReservedHatBranch();`
+- `error ProposalsArePaused();`
+- `error WithdrawalsArePaused();`
 - `error SafeExecutionFailed(bytes returnData);`
 - `error ERC20TransferReturnedFalse(address token, bytes returnData);`
+- `error ERC20TransferMalformedReturn(address token, bytes returnData);`
 
 ---
 
@@ -461,7 +461,7 @@ During operation:
 
 - Executing a proposal in Proposal Hatter increments internal allowances; it does not affect Safe owner settings.
 - Withdrawals call the Safe via `execTransactionFromModuleReturnData`. If a withdrawal fails at the token or ETH transfer layer, the transaction reverts and the internal ledger rollback is preserved.
-- If the DAO migrates the Safe, the owner can update the target via `setFundingSource(newSafe, _)`. Future withdrawals use the new address; existing proposals and internal ledger are unchanged.
+- If the DAO migrates the Safe, the owner can update the target via `setSafe(newSafe)`. Future withdrawals use the new address; existing proposals and internal ledger are unchanged.
 
 
 ---
@@ -481,7 +481,7 @@ During operation:
 
 Lifecycle
 
-- Propose → Succeed → Execute happy path (with/without timelock).
+- Propose → Approve → Execute happy path (with/without timelock).
 - Public execution when `executorHatId == PUBLIC_SENTINEL`; restricted when set.
 - Duplicates: proposing identical inputs with the same salt rejects with `AlreadyUsed`; changing the salt permits a new proposal.
 
@@ -491,11 +491,11 @@ Calldata integrity
 - For proposals with a non-empty `hatsMulticall`, if the stored bytes are cleared/missing before `execute`, revert.
 - Reading proposal data returns the exact stored `hatsMulticall` bytes.
 
-Escalation / Cancel / Defeat
+Escalation / Cancel / Rejection
 
 - `escalate` (Escalator Hat) blocks execution.
 - `cancel` by submitter at any time pre‑execution.
-- `reject` by Approver Ticket Hat wearer sets proposal to `Defeated` and blocks execution.
+- `reject` by Approver Ticket Hat wearer sets proposal to `Rejected` and blocks execution.
 
 Withdrawals
 
