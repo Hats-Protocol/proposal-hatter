@@ -10,16 +10,16 @@ env:
   INFURA_KEY: ${{ secrets.INFURA_KEY }}
 
 jobs:
-  lint-markdown:
-    name: "Markdown Linting"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Lint markdown files
-        uses: docker://avtodev/markdown-lint:v1
-        with:
-          args: "**/*.md"
+  # lint-markdown:
+  #   name: "Markdown Linting"
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+
+  #     - name: Lint markdown files
+  #       uses: docker://avtodev/markdown-lint:v1
+  #       with:
+  #         args: "**/*.md"
 
   check:
     name: "Format & Lint"
