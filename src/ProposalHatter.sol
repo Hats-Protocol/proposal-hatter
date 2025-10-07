@@ -56,6 +56,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   uint256 internal constant PUBLIC_SENTINEL = 1; // never a valid Hats ID
   // Sentinel non-zero address for Hats modules (eligibility/toggle)
   address internal constant EMPTY_SENTINEL = address(1);
+  // keccak256("Proposed(bytes32,bytes32,address,uint256,address,uint32,address,uint256,uint256,uint256,bytes32)")
+  bytes32 private constant _PROPOSED_EVENT_SIGNATURE =
+    0xf6d1b6d79196970a10149b547ab0f6c675ce1d689f3afc40834aea929244437d;
 
   // --------------------
   // Storage
@@ -197,20 +200,44 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       hatsMulticall: hatsMulticall
     });
 
-    // Log the proposal
-    emit IProposalHatterEvents.Proposed(
-      proposalId,
-      EfficientHashLib.hash(hatsMulticall),
-      msg.sender,
-      fundingAmount_,
-      fundingToken_,
-      timelockSec_,
-      safe_,
-      recipientHatId_,
-      approverHatId_,
-      reservedHatId_,
-      salt
-    );
+    // // Log the proposal
+    // emit IProposalHatterEvents.Proposed(
+    //   proposalId,
+    //   EfficientHashLib.hash(hatsMulticall),
+    //   msg.sender,
+    //   fundingAmount_,
+    //   fundingToken_,
+    //   timelockSec_,
+    //   safe_,
+    //   recipientHatId_,
+    //   approverHatId_,
+    //   reservedHatId_,
+    //   salt
+    // );
+
+    // Log the proposal without re-introducing stack pressure
+    // TODO remove this once we decide how to handle stack too deep errors with the above vanilla emit
+    bytes32 hatsMulticallHash = EfficientHashLib.hash(hatsMulticall);
+    assembly {
+      let dataPtr := mload(0x40)
+      mstore(dataPtr, fundingAmount_)
+      mstore(add(dataPtr, 0x20), and(fundingToken_, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))
+      mstore(add(dataPtr, 0x40), timelockSec_)
+      mstore(add(dataPtr, 0x60), and(safe_, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))
+      mstore(add(dataPtr, 0x80), recipientHatId_)
+      mstore(add(dataPtr, 0xa0), approverHatId_)
+      mstore(add(dataPtr, 0xc0), reservedHatId_)
+      mstore(add(dataPtr, 0xe0), salt)
+      mstore(0x40, add(dataPtr, 0x100))
+      log4(
+        dataPtr,
+        0x100,
+        _PROPOSED_EVENT_SIGNATURE,
+        proposalId,
+        hatsMulticallHash,
+        and(caller(), 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+      )
+    }
   }
 
   /// @inheritdoc IProposalHatter
