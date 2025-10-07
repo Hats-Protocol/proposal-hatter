@@ -21,10 +21,10 @@ contract Deploy is Script {
   /// forge-lint: disable-next-item(mixed-case-variable)
   address public HATS_PROTOCOL_ADDRESS = 0x0000000000000000000000000000000000000000;
   address public safe = 0x0000000000000000000000000000000000000000;
-  address public allowanceModule = 0x0000000000000000000000000000000000000000;
-  uint256 public proposer = 0;
-  uint256 public executor = 0;
-  uint256 public escalator = 0;
+  uint256 public ownerHat = 0;
+  uint256 public proposerHat = 0;
+  uint256 public executorHat = 0;
+  uint256 public escalatorHat = 0;
   uint256 public approverBranchId = 0;
   uint256 public opsBranchId = 0;
 
@@ -58,7 +58,7 @@ contract Deploy is Script {
      *    2. The provided salt, `SALT`
      */
     proposalHatter = new ProposalHatter{ salt: SALT }(
-      HATS_PROTOCOL_ADDRESS, safe, allowanceModule, proposer, executor, escalator, approverBranchId, opsBranchId
+      HATS_PROTOCOL_ADDRESS, safe, ownerHat, proposerHat, executorHat, escalatorHat, approverBranchId, opsBranchId
     );
 
     vm.stopBroadcast();
