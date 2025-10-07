@@ -45,20 +45,40 @@ contract Deploy is Script {
     }
   }
 
-  /// @dev Deploy the contract to a deterministic address via forge's create2 deployer factory.
-  function run() public virtual {
-    vm.startBroadcast(deployer());
-
+  /// @dev Deploy ProposalHatter with deterministic address using CREATE2
+  /// @notice Can be called by tests or production deployments
+  /// @return Deployed ProposalHatter instance
+  function deploy(
+    address hatsProtocol_,
+    address safe_,
+    uint256 ownerHat_,
+    uint256 proposerHat_,
+    uint256 executorHat_,
+    uint256 escalatorHat_,
+    uint256 approverBranchId_,
+    uint256 opsBranchId_,
+    bytes32 salt_
+  ) public returns (ProposalHatter) {
     /**
      * @dev Deploy the contract to a deterministic address via forge's create2 deployer factory, which is at this
      * address on all chains: `0x4e59b44847b379578588920cA78FbF26c0B4956C`.
      * The resulting deployment address is determined by only two factors:
      *    1. The bytecode hash of the contract to deploy. Setting `bytecode_hash` to "none" in foundry.toml ensures that
      *       never differs regardless of where its being compiled
-     *    2. The provided salt, `SALT`
+     *    2. The provided salt, `salt_`
      */
-    proposalHatter = new ProposalHatter{ salt: SALT }(
-      HATS_PROTOCOL_ADDRESS, safe, ownerHat, proposerHat, executorHat, escalatorHat, approverBranchId, opsBranchId
+    proposalHatter = new ProposalHatter{ salt: salt_ }(
+      hatsProtocol_, safe_, ownerHat_, proposerHat_, executorHat_, escalatorHat_, approverBranchId_, opsBranchId_
+    );
+    return proposalHatter;
+  }
+
+  /// @dev Deploy the contract using configured values
+  function run() public virtual {
+    vm.startBroadcast(deployer());
+
+    deploy(
+      HATS_PROTOCOL_ADDRESS, safe, ownerHat, proposerHat, executorHat, escalatorHat, approverBranchId, opsBranchId, SALT
     );
 
     vm.stopBroadcast();
