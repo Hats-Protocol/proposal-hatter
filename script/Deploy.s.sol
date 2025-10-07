@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.18;
+pragma solidity ^0.8.30;
 
 import { Script, console2 } from "forge-std/Script.sol";
-import { Counter } from "../src/Counter.sol";
+import { ProposalHatter } from "../src/ProposalHatter.sol";
 
 interface ImmutableCreate2Factory {
   function create2(bytes32 salt, bytes calldata initializationCode)
@@ -12,11 +12,21 @@ interface ImmutableCreate2Factory {
 }
 
 contract Deploy is Script {
-  Counter public counter;
+  ProposalHatter public proposalHatter;
+  /// forge-lint: disable-next-item(mixed-case-variable)
   bytes32 public SALT = bytes32(abi.encode("lets add some salt to these eggs"));
 
   // default values
   bool internal _verbose = true;
+  /// forge-lint: disable-next-item(mixed-case-variable)
+  address public HATS_PROTOCOL_ADDRESS = 0x0000000000000000000000000000000000000000;
+  address public safe = 0x0000000000000000000000000000000000000000;
+  uint256 public ownerHat = 0;
+  uint256 public proposerHat = 0;
+  uint256 public executorHat = 0;
+  uint256 public escalatorHat = 0;
+  uint256 public approverBranchId = 0;
+  uint256 public opsBranchId = 0;
 
   /// @dev Override default values, if desired
   function prepare(bool verbose) public {
@@ -31,7 +41,7 @@ contract Deploy is Script {
 
   function _log(string memory prefix) internal view {
     if (_verbose) {
-      console2.log(string.concat(prefix, "Counter:"), address(counter));
+      console2.log(string.concat(prefix, "ProposalHatter:"), address(proposalHatter));
     }
   }
 
@@ -47,7 +57,9 @@ contract Deploy is Script {
      *       never differs regardless of where its being compiled
      *    2. The provided salt, `SALT`
      */
-    counter = new Counter{ salt: SALT}(/* insert constructor args here */);
+    proposalHatter = new ProposalHatter{ salt: SALT }(
+      HATS_PROTOCOL_ADDRESS, safe, ownerHat, proposerHat, executorHat, escalatorHat, approverBranchId, opsBranchId
+    );
 
     vm.stopBroadcast();
 
@@ -65,7 +77,7 @@ contract DeployPrecompiled is Deploy {
     bytes memory args = abi.encode( /* insert constructor args here */ );
 
     /// @dev Load and deploy pre-compiled ir-optimized bytecode.
-    counter = Counter(deployCode("optimized-out/Counter.sol/Counter.json", args));
+    proposalHatter = ProposalHatter(deployCode("optimized-out/ProposalHatter.sol/ProposalHatter.json", args));
 
     vm.stopBroadcast();
 
