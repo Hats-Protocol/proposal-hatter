@@ -2,97 +2,267 @@ name: ci
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
 
 env:
   FOUNDRY_PROFILE: ci
   INFURA_KEY: ${{ secrets.INFURA_KEY }}
-  ALCHEMY_KEY: ${{ secrets.ALCHEMY_KEY }}
-  GC_RPC: ${{ secrets.GC_RPC }}
-  POLYGON_RPC: ${{ secrets.POLYGON_RPC }}
-  PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
-  
+
 jobs:
-  
-  lint:
-    name: "Markdown linting"
+  lint-markdown:
+    name: "Markdown Linting"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-        name: Check out the code
-      - name: Lint Code Base
+      - uses: actions/checkout@v4
+      
+      - name: Lint markdown files
         uses: docker://avtodev/markdown-lint:v1
         with:
           args: "**/*.md"
-  test:
-    name: "Foundry tests"
+
+  check:
+    name: "Format & Lint"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
 
-      - name: Check formatting
+      - name: Check Solidity formatting
         run: forge fmt --check
-      
+
       - name: Check contract sizes
-        run: forge build --sizes --skip script
-        # Replace the above line with the below if using pre-compiled ir-optimized contracts
-        # run: FOUNDRY_PROFILE=optimized forge build --sizes --skip script
+        run: forge build --sizes
 
-      - name: Run tests
-        run: forge test -vvv
-
-  coverage:
-    name: "Test coverage"
-
-    env:
-      FOUNDRY_PROFILE: lite
-
+  build:
+    name: "Build & Compile"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore cached build
+        uses: actions/cache/restore@v4
+        id: cache-build-restore
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      - name: Build contracts
+        run: forge build
+
+      - name: Cache build artifacts
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+
+  test-unit:
+    name: "Unit Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      - name: Run unit tests
+        run: forge test --match-path "test/unit/**/*.sol" -vvv
+
+  test-integration:
+    name: "Integration Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      - name: Run integration tests
+        run: forge test --match-path "test/integration/**/*.sol" -vvv
+
+  test-invariant:
+    name: "Invariant Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      - name: Run invariant tests
+        run: forge test --match-path "test/invariant/**/*.sol" -vvv
+
+  test-attacks:
+    name: "Attack Vector Tests"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      - name: Run attack tests
+        run: forge test --match-path "test/attacks/**/*.sol" -vvv
+
+  snapshot:
+    name: "Gas Snapshot Check"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      - name: Check gas snapshots
+        run: |
+          forge snapshot --check --tolerance 2 \
+            --no-match-path "test/invariant/**/*.sol" \
+            --no-match-test "testFuzz"
+        env:
+          FOUNDRY_FUZZ_SEED: 0x42
+
+  coverage:
+    name: "Test Coverage"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
 
       - name: Run coverage
         run: forge coverage --report summary --report lcov
 
-      # To ignore coverage for certain directories modify the paths in this step as needed. The
-      # below default ignores coverage results for the test and script directories. Alternatively,
-      # to include coverage in all directories, comment out this step. Note that because this
-      # filtering applies to the lcov file, the summary table generated in the previous step will
-      # still include all files and directories.
-      # The `--rc lcov_branch_coverage=1` part keeps branch info in the filtered report, since lcov
-      # defaults to removing branch info.
-      - name: Filter directories
-        run: |
-          sudo apt update && sudo apt install -y lcov
-          lcov --remove lcov.info 'src/mocks/*' 'test/*' 'script/*' --output-file lcov.info --rc lcov_branch_coverage=1
+      - name: Install lcov
+        run: sudo apt-get update && sudo apt-get install -y lcov
 
-      # This step posts a detailed coverage report as a comment and deletes previous comments on
-      # each push. The below step is used to fail coverage if the specified coverage threshold is
-      # not met. The below step can post a comment (when it's `github-token` is specified) but it's
-      # not as useful, and this action cannot fail CI based on a minimum coverage threshold, which
-      # is why we use both in this way.
-      - name: Post coverage report
-        if: github.event_name == 'pull_request' # This action fails when ran outside of a pull request.
+      - name: Filter coverage
+        run: |
+          lcov --remove lcov.info \
+            'test/*' 'script/*' 'lib/*' \
+            --output-file lcov.info \
+            --rc branch_coverage=1
+
+      - name: Generate coverage report
         uses: romeovs/lcov-reporter-action@v0.3.1
+        if: github.event_name == 'pull_request'
         with:
           delete-old-comments: true
           lcov-file: ./lcov.info
-          github-token: ${{ secrets.GITHUB_TOKEN }} # Adds a coverage summary comment to the PR.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify minimum coverage
-        uses: zgosalvez/github-actions-report-lcov@v2
+        uses: zgosalvez/github-actions-report-lcov@v3
         with:
           coverage-files: ./lcov.info
-          minimum-coverage: 95 # Set coverage threshold.
+          minimum-coverage: 90

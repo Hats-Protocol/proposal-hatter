@@ -1,60 +1,82 @@
-name: Report gas diff
+name: Gas Diff Report
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
-    # Optionally configure to run only for changes in specific files. For example:
     paths:
-    - src/**
-    - test/**
-    - foundry.toml
-    - remappings.txt
-    - .github/workflows/foundry-gas-diff.yml
+      - "src/**"
+      - "test/unit/**"
+      - "test/integration/**"
+      - "test/gas/**"
+      - "foundry.toml"
+      - ".github/workflows/foundry-gas-diff.yml"
 
 env:
   FOUNDRY_PROFILE: default
   INFURA_KEY: ${{ secrets.INFURA_KEY }}
-  ALCHEMY_KEY: ${{ secrets.ALCHEMY_KEY }}
-  GC_RPC: ${{ secrets.GC_RPC }}
-  POLYGON_RPC: ${{ secrets.POLYGON_RPC }}
-  PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
 
 jobs:
   compare_gas_reports:
+    name: "Compare Gas Reports"
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: "nightly-de33b6af53005037b463318d2628b5cfcaf39916"
 
-      # Add any step generating a gas report to a temporary file named gasreport.ansi. For example:
-      - name: Run tests
-        run: forge test --gas-report > gasreport.ansi # <- this file name should be unique in your repository!
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cache
+            out
+          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+          restore-keys: |
+            foundry-build-
+
+      # Generate gas report excluding fuzz and invariant tests
+      # Only include: unit, integration, gas benchmark, and attack tests
+      - name: Run tests for gas report
+        run: |
+          forge test --gas-report \
+            --no-match-path "test/invariant/**/*.sol" \
+            --no-match-test "testFuzz" \
+            > gasreport.ansi
         env:
-          # make fuzzing semi-deterministic to avoid noisy gas cost estimation
-          # due to non-deterministic fuzzing (but still use pseudo-random fuzzing seeds)
+          # Deterministic seed for consistent gas measurements
           FOUNDRY_FUZZ_SEED: 0x${{ github.event.pull_request.base.sha || github.sha }}
 
       - name: Compare gas reports
-        uses: Rubilmax/foundry-gas-diff@v3.13.6
+        uses: Rubilmax/foundry-gas-diff@v3.18
         with:
-          summaryQuantile: 0.9 # only display the 10% most significant gas diffs in the summary (defaults to 20%)
-          sortCriteria: avg,max # sort diff rows by criteria
-          sortOrders: desc,asc # and directions
-          ignore: test-foundry/**/* # filter out gas reports from specific paths (test/ is included by default)
+          summaryQuantile: 0.85
+          sortCriteria: avg,max
+          sortOrders: desc,asc
+          report: gasreport.ansi
         id: gas_diff
 
       - name: Add gas diff to sticky comment
-        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request'
         uses: marocchino/sticky-pull-request-comment@v2
         with:
-          # delete the comment in case changes no longer impact gas costs
+          header: gas-diff
           delete: ${{ !steps.gas_diff.outputs.markdown }}
-          message: ${{ steps.gas_diff.outputs.markdown }}
+          message: |
+            ## ⛽ Gas Report
+            
+            ${{ steps.gas_diff.outputs.markdown }}
+            
+            <details>
+            <summary>ℹ️ About this report</summary>
+            
+            - Includes: **unit**, **integration**, **gas benchmark**, and **attack** tests
+            - Excludes: **fuzz** and **invariant** tests (non-deterministic)
+            - Using deterministic seed: `${{ github.event.pull_request.base.sha || github.sha }}`
+            - Showing top 15% most significant changes
+            </details>
