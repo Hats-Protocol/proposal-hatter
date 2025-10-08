@@ -73,15 +73,9 @@ contract Reject_Tests is ForkTestBase {
 
   function test_RevertIf_Reject_Approved() public {
     // Create and approve a proposal
-    (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expected) =
-      _createTestProposal(1 days, bytes32(uint256(109)));
+    (bytes32 proposalId,) = _createTestProposal(1 days, bytes32(uint256(109)));
 
-    // Mint approver hat and approve
-    vm.prank(approverAdmin);
-    hats.mintHat(expected.approverHatId, approver);
-
-    vm.prank(approver);
-    proposalHatter.approve(proposalId);
+    _approveProposal(proposalId);
 
     // Attempt to reject an approved proposal
     vm.expectRevert(

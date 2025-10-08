@@ -308,10 +308,12 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // - when there is no timelock
     IProposalHatter.ProposalState state = p.state;
     if (state != IProposalHatterTypes.ProposalState.Active) revert IProposalHatterErrors.InvalidState(state);
-    if (p.timelockSec != 0) revert IProposalHatterErrors.InvalidState(state);
+    uint64 nowTs = uint64(block.timestamp);
+    uint32 timelockSec = p.timelockSec;
+    if (timelockSec != 0) revert IProposalHatterErrors.TooEarly(nowTs + timelockSec, nowTs);
 
     // Log the approval
-    uint64 eta = uint64(block.timestamp);
+    uint64 eta = nowTs;
     p.eta = eta;
     emit IProposalHatterEvents.Approved(proposalId, msg.sender, eta);
 
@@ -356,7 +358,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     p.state = IProposalHatterTypes.ProposalState.Rejected;
 
     // If it exists, toggle off the reserved hat to clean up
-    if (p.reservedHatId != 0) _toggleOffReservedHat(p.reservedHatId);
+    if (p.reservedHatId != 0) _toggleOffHat(p.reservedHatId);
 
     // Log the rejection
     emit IProposalHatterEvents.Rejected(proposalId, msg.sender);
@@ -380,7 +382,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     p.state = IProposalHatterTypes.ProposalState.Canceled;
 
     // If it exists, toggle off the reserved hat to clean up
-    if (p.reservedHatId != 0) _toggleOffReservedHat(p.reservedHatId);
+    if (p.reservedHatId != 0) _toggleOffHat(p.reservedHatId);
 
     // Log the cancellation
     emit IProposalHatterEvents.Canceled(proposalId, msg.sender);
@@ -643,14 +645,16 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     );
   }
 
-  /// @dev Internal helper to toggle off a reserved hat to clean up after its proposal is rejected or canceled
-  /// @param reservedHatId The id of the reserved hat to toggle off
-  function _toggleOffReservedHat(uint256 reservedHatId) internal {
+  /// @dev Internal helper to toggle off a hat
+  /// Useful for toggling off approver hats after a proposal is approved, rejected, or canceled; and reserved hats after
+  /// a proposal is rejected or canceled
+  /// @param hatId The id of the hat to toggle off
+  function _toggleOffHat(uint256 hatId) internal {
     // Set this contract as the toggle module
-    IHats(HATS_PROTOCOL_ADDRESS).changeHatToggle(reservedHatId, address(this));
+    IHats(HATS_PROTOCOL_ADDRESS).changeHatToggle(hatId, address(this));
 
     // Set the hat status to false
-    IHats(HATS_PROTOCOL_ADDRESS).setHatStatus(reservedHatId, false);
+    IHats(HATS_PROTOCOL_ADDRESS).setHatStatus(hatId, false);
   }
 
   /// @dev Internal helper to execute an ETH or ERC20 transfer from the Safe to the caller. This contract must be an
@@ -678,6 +682,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
     // Try the Safe module call, reverting if it fails, following the OpenZeppelin SafeERC20 library patterns for ERC20
     // transfers.
+    // If ProposalHatter is not enabled as a module on the Safe, the Safe will revert the tx with string "GS104"
     (bool success, bytes memory ret) =
       ModuleManager(safe_).execTransactionFromModuleReturnData(to, value, data, Enum.Operation.Call);
     if (!success) revert IProposalHatterErrors.SafeExecutionFailed(ret);

@@ -133,7 +133,7 @@ contract Cancel_Tests is ForkTestBase {
 
   function test_RevertIf_Cancel_Executed() public {
     // Create, approve, and execute a proposal
-    bytes32 proposalId = _executeFullProposalLifecycle();
+    (bytes32 proposalId,) = _executeFullProposalLifecycle();
 
     // Attempt to cancel an executed proposal
     vm.expectRevert(

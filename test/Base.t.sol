@@ -7,6 +7,7 @@ import { ProposalHatter } from "../src/ProposalHatter.sol";
 import { IHats } from "../lib/hats-protocol/src/Interfaces/IHats.sol";
 import { IProposalHatter, IProposalHatterTypes } from "../src/interfaces/IProposalHatter.sol";
 import { IERC20 } from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import { TestHelpers } from "./helpers/TestHelpers.sol";
 
 interface ISafe {
   function setup(
@@ -214,7 +215,7 @@ contract ForkTestBase is Test {
     proposerHat = hats.createHat(topHatId, "Proposer", 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
 
     // Create executor hat (x.4)
-    executorHat = hats.createHat(topHatId, "Executor", 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
+    executorHat = hats.createHat(topHatId, "Executor", 2, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
 
     // Create escalator hat (x.5)
     escalatorHat = hats.createHat(topHatId, "Escalator", 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
@@ -400,12 +401,27 @@ contract ForkTestBase is Test {
     require(state == IProposalHatterTypes.ProposalState.Active, "Proposal not active");
 
     // Mint approver hat to approver account
-    vm.prank(address(proposalHatter));
+    vm.prank(approverAdmin);
     hats.mintHat(approverHatId, approver);
 
     // Approve as approver
     vm.prank(approver);
     proposalHatter.approve(proposalId);
+  }
+
+  function _rejectProposal(bytes32 proposalId) internal {
+    // Get the proposal to find its approver hat
+    (,, IProposalHatterTypes.ProposalState state,,,,,, uint256 approverHatId,,) = proposalHatter.proposals(proposalId);
+
+    require(state == IProposalHatterTypes.ProposalState.Active, "Proposal not active");
+
+    // Mint approver hat to approver account
+    vm.prank(approverAdmin);
+    hats.mintHat(approverHatId, approver);
+
+    // Reject as approver
+    vm.prank(approver);
+    proposalHatter.reject(proposalId);
   }
 
   /// @dev Executes a proposal as the executor
@@ -424,11 +440,38 @@ contract ForkTestBase is Test {
 
   /// @dev Full proposal lifecycle: propose -> approve -> wait -> execute
   /// @return proposalId The executed proposal ID
-  function _executeFullProposalLifecycle() internal returns (bytes32 proposalId) {
-    (proposalId,) = _createTestProposal();
+  /// @return expectedProposal The expected proposal data
+  function _executeFullProposalLifecycle()
+    internal
+    returns (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expectedProposal)
+  {
+    (proposalId, expectedProposal) = _createTestProposal();
     _approveProposal(proposalId);
     _warpPastETA(proposalId);
     _executeProposal(proposalId);
+
+    // set the expected proposal state to executed
+    expectedProposal.state = IProposalHatterTypes.ProposalState.Executed;
+  }
+
+  /// @dev Full proposal lifecycle with custom funding parameters
+  /// @param fundingToken The funding token address
+  /// @param fundingAmount The funding amount
+  /// @param recipientHatId The recipient hat ID
+  /// @return proposalId The executed proposal ID
+  /// @return expectedProposal The expected proposal data
+  function _executeFullProposalLifecycle(address fundingToken, uint88 fundingAmount, uint256 recipientHatId)
+    internal
+    returns (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expectedProposal)
+  {
+    (proposalId, expectedProposal) =
+      _createTestProposal(fundingAmount, fundingToken, 0, recipientHatId, 0, bytes(""), bytes32(0));
+    _approveProposal(proposalId);
+    _warpPastETA(proposalId);
+    _executeProposal(proposalId);
+
+    // set the expected proposal state to executed
+    expectedProposal.state = IProposalHatterTypes.ProposalState.Executed;
   }
 
   /// @dev Creates and returns a malicious ERC20 token for testing
@@ -481,7 +524,7 @@ contract ForkTestBase is Test {
     });
   }
 
-  /// @dev Helper to assert that a hat was created correctly
+  /// @dev Helper to assert that a simple hat was created correctly
   /// @param hatId The hat ID to check
   /// @param expectedAdmin The expected admin hat ID
   /// @param expectedDetails The expected details string
@@ -584,6 +627,64 @@ contract ForkTestBase is Test {
     } else {
       deal(token, to, amount);
     }
+  }
+
+  /// @dev Construct a hatsMulticall payload that creates a single hat with standard defaults.
+  /// @param adminHatId The admin hat ID for the new hat.
+  /// @param details The details string for the new hat.
+  /// @return hatsMulticall Encoded bytes ready for proposal storage.
+  function _buildSingleHatCreationMulticall(uint256 adminHatId, string memory details)
+    internal
+    pure
+    returns (bytes memory hatsMulticall)
+  {
+    return TestHelpers.singleHatCreationMulticall(adminHatId, details);
+  }
+
+  /// @dev Create and approve a proposal that will create a single hat during execution.
+  /// @param adminHatId The admin hat ID under which the new hat will be created.
+  /// @param newHatDetails The details string for the new hat.
+  /// @param fundingAmount Funding amount for the proposal.
+  /// @param fundingToken Token address used for the proposal funding.
+  /// @param timelockSec Timelock duration for the proposal.
+  /// @param recipientHatId Recipient hat that will receive allowance.
+  /// @param reservedHatId Reserved hat ID (0 if none).
+  /// @param salt Salt forwarded to propose() for uniqueness.
+  /// @return proposalId The created proposal ID.
+  /// @return expectedNewHatId The hat ID expected to be created when multicall executes.
+  /// @return expectedProposal Expected proposal data after approval.
+  function _createApprovedProposalWithHatCreation(
+    uint256 adminHatId,
+    string memory newHatDetails,
+    uint88 fundingAmount,
+    address fundingToken,
+    uint32 timelockSec,
+    uint256 recipientHatId,
+    uint256 reservedHatId,
+    bytes32 salt
+  )
+    internal
+    returns (bytes32 proposalId, uint256 expectedNewHatId, IProposalHatterTypes.ProposalData memory expectedProposal)
+  {
+    expectedNewHatId = _getNextHatId(adminHatId);
+    bytes memory hatsMulticall = _buildSingleHatCreationMulticall(adminHatId, newHatDetails);
+
+    (proposalId, expectedProposal) =
+      _createTestProposal(fundingAmount, fundingToken, timelockSec, recipientHatId, reservedHatId, hatsMulticall, salt);
+
+    expectedProposal.eta = uint64(block.timestamp) + uint64(timelockSec);
+
+    _approveProposal(proposalId);
+
+    expectedProposal.state = IProposalHatterTypes.ProposalState.Approved;
+  }
+
+  /// @dev Convenience overload with standard defaults for single hat creation proposals.
+  function _createApprovedProposalWithHatCreation(uint256 adminHatId, string memory newHatDetails)
+    internal
+    returns (bytes32 proposalId, uint256 expectedNewHatId, IProposalHatterTypes.ProposalData memory expectedProposal)
+  {
+    return _createApprovedProposalWithHatCreation(adminHatId, newHatDetails, 1e18, ETH, 0, recipientHat, 0, bytes32(0));
   }
 
   /// @dev Helper to get a funding token by index for fuzz testing

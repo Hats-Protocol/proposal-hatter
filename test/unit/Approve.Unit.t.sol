@@ -115,7 +115,7 @@ contract Approve_Tests is ForkTestBase {
 
   function test_RevertIf_Approve_Executed() public {
     // Create, approve, and execute a proposal
-    bytes32 proposalId = _executeFullProposalLifecycle();
+    (bytes32 proposalId,) = _executeFullProposalLifecycle();
 
     // Attempt to approve an executed proposal
     vm.expectRevert(
