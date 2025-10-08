@@ -9,10 +9,31 @@ Tests assume Solidity ^0.8.30, Forge v1.3.0+, and adhere to best practices: desc
 **Key Principles:**
 - **Fork-Centric**: All tests fork mainnet at a pinned block (23000000, post-Dencun, with Hats Protocol and Safe deployed). Use `vm.createSelectFork` for isolation.
 - **No Mocks**: Interact with real Hats Protocol (address: 0x3bc1A0Ad72417f2d411118085256fC53CBdDd137) and Safe v1.4.1 instances.
-- **Reusability**: A base `ProposalHatterTest` contract defines shared setup (hats, accounts, Safes, tokens).
+- **Reusability & DRY**: A base `ForkTestBase` contract defines shared setup (hats, accounts, Safes, tokens) and comprehensive helper functions to eliminate duplication:
+  - **Lifecycle Helpers**: `_createTestProposal()` (with multiple overloads), `_approveProposal()`, `_executeProposal()`, `_rejectProposal()`, `_executeFullProposalLifecycle()` encapsulate common workflows
+  - **Custom Assertions**: `_assertProposalData()`, `_assertHatCreated()`, `_assertHatToggle()` provide semantic, reusable verification with descriptive failure messages
+  - **State Builders**: `_buildExpectedProposal()` constructs expected state structs with contract-provided defaults
+  - **Test Data Helpers**: `_getNextHatId()`, `_getFundingToken()`, `_getTestActor()`, `_buildSingleHatCreationMulticall()` provide deterministic test data
+  - **Utility Functions**: `_getProposalData()`, `_warpPastETA()`, `_dealTokens()`, `_getBalance()` abstract common operations
+  - Tests inherit these helpers to focus on scenario logic, not boilerplate setup/verification
 - **Coverage Goals**: 100% line/branch coverage via `forge coverage`; gas snapshots with `forge snapshot`.
 - **CI Integration**: Run with `forge test --fuzz-runs 10000 --invariant-runs 1000 --invariant-depth 50` in GitHub Actions, caching RPC responses.
 - **Security Focus**: Test edge cases (reverts, overflows, reentrancy), inspired by known exploits (e.g., TOCTOU races, allowance manipulations).
+- **Arrange-Act-Assert Pattern**: Every test follows clear three-phase structure with inline comments explaining each logical step.
+- **State-Aware Testing**: For state-dependent functions, exhaustively test all possible state transitions (None, Active, Approved, Executed, Escalated, Canceled, Rejected).
+- **Event-Driven Verification**: Always use `vm.expectEmit` before state-changing operations to verify correct event emission with exact parameters.
+- **Expected Data Structures**: Build expected state structs before operations, then update and assert against actual state after actions complete.
+- **Comprehensive Authorization**: Every privileged function has corresponding `test_RevertIf_Not{Role}` tests using dedicated `maliciousActor` account.
+- **Unique Test Isolation**: Use unique salt values (magic numbers, descriptive strings, or derived from parameters) for each test to prevent proposal ID collisions.
+- **Descriptive Naming**: Test names follow strict conventions: `test_{Action}{Scenario}` for happy paths, `test_RevertIf_{Condition}` for reverts, `testFuzz_{Scenario}` for fuzz tests.
+- **State Persistence Verification**: After revert tests, always verify that state remains unchanged from pre-action expectations.
+- **Helper Function Leverage**: Maximize use of base contract helpers for consistency and readability.
+- **Pause Mechanism Testing**: Verify pause checks where required, and explicitly test that `escalate()`, `reject()`, and `cancel()` bypass pause checks.
+- **Multi-Safe Isolation**: Test that proposal-bound safe addresses persist correctly and changes to global safe don't affect existing proposals.
+- **Deterministic Fuzz Testing**: Use helper functions to select from predefined arrays for consistent, reproducible fuzz behavior.
+- **TODO Transparency**: Unimplemented tests marked with clear TODO comments in body describing expected behavior, enabling incremental development.
+- **Assertion Clarity**: Every assertion includes descriptive failure messages for rapid debugging when tests fail.
+- **Descriptive Comments**: Every test includes comments explaining the test and each step along the way.
 
 ## Base Test Environment
 
@@ -292,26 +313,78 @@ Use `vm.warp` for timelock simulation, `vm.prank` for role-based calls.
 Invariant tests use handler contracts (like Sablier's) to fuzz stateful interactions. Prefix: `invariant_PropertyName`. Config: 1000 runs, depth 50. Define handlers for actions (propose, approve, etc.), ghost variables for tracking (e.g., totalAllowances).
 
 **Outlined Invariants** (from spec Section 7 + analysis):
-1. **Allowance Monotonicity**: Allowances only increase on successful execute, decrease on withdraw. Never negative. (Ghost: track pre/post per (safe, hat, token) tuple).
-2. **State Machine Integrity**: Proposals follow valid transitions (e.g., can't execute Escalated/Canceled; eta respected). (Handler: fuzz lifecycle calls, assert state).
-3. **Proposal ID Uniqueness**: Identical inputs+salt+submitter yield same ID; no overwrites. Different submitters yield different IDs. (Fuzz inputs, assert no collisions).
-4. **Funding Custody**: Safe balance decreases only on successful withdraw; internal allowance matches pulled amounts. (Ghost: sum of withdrawals == Safe balance delta per tuple).
-5. **Atomicity**: If multicall fails, no allowance change/state advance. (Handler: simulate failing multicalls).
-6. **Pausability**: Paused functions always revert; unpaused work. (Fuzz pause toggles mid-sequence).
-7. **Hat Auth**: Unauthorized calls always revert. (Fuzz callers without hats).
-8. **Safe Address Immutability Per Proposal**: Once proposed, p.safe never changes. (Ghost: track all proposals, assert p.safe == original).
-9. **Allowance Conservation**: Sum of all allowances across (safe, hat, token) == sum of all executed proposal fundingAmounts for that tuple. (Ghost: track executed proposals per tuple).
-10. **No Orphaned Allowances**: Every non-zero allowance has at least one corresponding executed proposal. (Ghost: map allowances to proposals).
-11. **Reserved Hat Lifecycle**: Reserved hats are only toggled off on cancel/reject, never on execute. (Ghost: track reserved hat active states).
-12. **Gas Refund Consistency**: After execute, hatsMulticall is empty iff original length > 0. (Ghost: track pre-execute lengths).
-13. **Multi-Safe Isolation**: Allowances for (safeA, hat, token) are independent of (safeB, hat, token). (Handler: fuzz operations across multiple safes).
-14. **No Stuck States**: Every non-terminal state has at least one valid transition path. (Handler: attempt all transitions from all states).
 
-**Handler Example** (ProposalHatterHandler.sol):
-- Actions: deposit (propose), approve, execute, withdraw, etc., with bounded fuzz inputs.
-- Use actors array, `useActor` modifier.
-- Ghost vars: e.g., `mapping(uint256 => mapping(address => uint256)) ghost_allowances`.
-- In `invariant_AllowanceMonotonicity`: Assert ghost matches contract storage.
+**Core Financial Invariants:**
+1. **Allowance Monotonicity**: Allowances only increase on successful execute, decrease on withdraw. Never negative. (Ghost: track pre/post per (safe, hat, token) tuple).
+2. **Allowance Conservation**: Sum of all allowances across (safe, hat, token) == sum of all executed proposal fundingAmounts for that tuple. (Ghost: track executed proposals per tuple).
+3. **Funding Custody**: Safe balance decreases only on successful withdraw; internal allowance matches pulled amounts. (Ghost: sum of withdrawals == Safe balance delta per tuple).
+4. **Overflow Protection**: Allowance arithmetic never overflows (reverts on overflow) or underflows (protected by checks). (Handler: fuzz large amounts near type(uint88).max).
+5. **No Orphaned Allowances**: Every non-zero allowance has at least one corresponding executed proposal. (Ghost: map allowances to proposals).
+
+**State Machine Invariants:**
+6. **State Machine Integrity**: Proposals follow valid transitions (e.g., can't execute Escalated/Canceled; eta respected). (Handler: fuzz lifecycle calls, assert state).
+7. **Terminal State Immutability**: Once a proposal reaches Executed, Rejected, or Canceled state, it can never transition to any other state. (Ghost: track terminal state entries).
+8. **ETA Temporal Invariant**: Once a proposal's ETA is set (on approve), it never decreases or changes. ETA is only set once per proposal. (Ghost: track ETA changes).
+9. **No Stuck States**: Every non-terminal state has at least one valid transition path. (Handler: attempt all transitions from all states).
+
+**Authorization & Security Invariants:**
+10. **Hat Auth**: Unauthorized calls always revert. (Fuzz callers without hats).
+11. **Authorization Consistency**: Changes to role hats (proposer, executor, escalator) do not affect authorization checks for existing active proposals. (Handler: change roles mid-lifecycle).
+12. **Approver Hat Uniqueness**: Each proposal gets a unique approver hat ID that cannot be reused by other proposals. (Ghost: track all created approver hats).
+
+**Proposal Data Integrity:**
+13. **Proposal ID Uniqueness**: Identical inputs+salt+submitter yield same ID; no overwrites. Different submitters yield different IDs. (Fuzz inputs, assert no collisions).
+14. **Safe Address Immutability Per Proposal**: Once proposed, p.safe never changes. (Ghost: track all proposals, assert p.safe == original).
+15. **Proposal Data Immutability**: Core proposal fields (submitter, fundingAmount, fundingToken, timelockSec, recipientHatId) remain unchanged after creation. (Ghost: track initial values).
+
+**System Behavior Invariants:**
+16. **Atomicity**: If multicall fails, no allowance change/state advance. (Handler: simulate failing multicalls).
+17. **Pausability Exception**: escalate(), reject(), and cancel() work even when proposals are paused; all other proposal operations revert when paused. (Handler: fuzz pause states).
+18. **Multicall Storage Consistency**: hatsMulticall storage is deleted if and only if execution succeeds with non-empty multicall. (Ghost: track multicall deletion events).
+19. **Reserved Hat Lifecycle**: Reserved hats (when reservedHatId != 0) are only toggled off on cancel/reject, never on execute. Reserved hats with id=0 are ignored. (Ghost: track reserved hat toggle events).
+20. **Reserved Hat Branch Validation**: When OPS_BRANCH_ID != 0, reserved hat admins must be within that branch. (Handler: fuzz invalid branch combinations).
+21. **Multi-Safe Isolation**: Allowances for (safeA, hat, token) are independent of (safeB, hat, token). (Handler: fuzz operations across multiple safes).
+
+**Enhanced Handler Design** (ProposalHatterHandler.sol):
+
+**Core Actions:**
+- `propose()`: Fuzz fundingAmount, timelock, reservedHatId; track proposal creation
+- `approve()`: Target active proposals; track ETA setting
+- `execute()`: Target approved proposals past ETA; track allowance changes
+- `withdraw()`: Target recipients with allowances; track balance changes
+- `escalate()`, `reject()`, `cancel()`: Target appropriate proposal states
+- `adminActions()`: Fuzz role changes, pause toggles, Safe updates
+
+**Advanced Fuzzing:**
+- **Temporal Actions**: `warpTime()` to test ETA enforcement and timelock behavior
+- **Role Changes**: `changeRoles()` mid-lifecycle to test authorization consistency
+- **Multi-Safe**: Actions across different Safe addresses for isolation testing
+- **Edge Cases**: Large amounts near type(uint88).max, zero values, malformed inputs
+
+**Ghost Variables:**
+- `ghost_proposalInitialData`: Track immutable proposal fields at creation
+- `ghost_allowanceHistory`: Track all allowance changes per (safe, hat, token)
+- `ghost_terminalStates`: Track proposals that reached terminal states
+- `ghost_etaChanges`: Track ETA setting events to ensure single-set invariant
+- `ghost_approverHats`: Track all created approver hat IDs for uniqueness
+- `ghost_multicallDeletions`: Track multicall storage deletion events
+
+**Invariant Examples:**
+```solidity
+function invariant_TerminalStateImmutability() external {
+    for (bytes32 id in ghost_terminalStates) {
+        ProposalState currentState = proposalHatter.getProposalState(id);
+        assert(currentState == ghost_terminalStates[id]); // Never changes
+    }
+}
+
+function invariant_ETANeverDecreases() external {
+    for (bytes32 id in ghost_etaChanges) {
+        uint64 currentETA = proposalHatter.proposals(id).eta;
+        assert(currentETA >= ghost_etaChanges[id].lastETA);
+    }
+}
+```
 
 Run with `forge test --match-contract Invariant`. 
 
@@ -427,6 +500,28 @@ Dedicated test files for security-critical scenarios. Organized by attack catego
   - During execute, external call reads ProposalHatter state
   - Verify CEI pattern: state updated before multicall (attacker sees post-execute state)
 
+### 4.7 State Consistency Attacks (test/attacks/StateConsistency.t.sol)
+
+- **test_Attack_ETAManipulation**:
+  - Attempt to approve same proposal multiple times to change ETA
+  - Verify ETA can only be set once and never changes
+
+- **test_Attack_TerminalStateRevival**:
+  - Execute proposal, then attempt to transition to other states
+  - Verify terminal states (Executed/Rejected/Canceled) are immutable
+
+- **test_Attack_ProposalDataMutation**:
+  - Attempt to modify core proposal fields after creation
+  - Verify immutability of submitter, fundingAmount, etc.
+
+- **test_Attack_ApproverHatReuse**:
+  - Create multiple proposals, verify each gets unique approver hat
+  - Attempt to reuse approver hat IDs across proposals
+
+- **test_Attack_RoleChangeExploit**:
+  - Change executor/approver roles mid-proposal lifecycle
+  - Verify existing proposals use original authorization rules
+
 ## 5. Gas Benchmarking (test/gas/)
 
 Track gas costs across proposal types using `forge snapshot`.
@@ -470,17 +565,16 @@ Tests organized by type, using multiple contracts per file for logical grouping.
 test/
 ├── Base.t.sol                          # Base fork setup (ForkTestBase)
 ├── unit/
-│   ├── Unit.t.sol                      # All unit tests in one file
-│   │                                   # Organized by contract sections:
-│   │                                   # - Constructor_Tests
-│   │                                   # - Propose_Tests  
-│   │                                   # - Approve_Tests
-│   │                                   # - Execute_Tests
-│   │                                   # - Lifecycle_Tests (escalate, reject, cancel)
-│   │                                   # - Withdraw_Tests
-│   │                                   # - Admin_Tests
-│   │                                   # - View_Tests
-│   └── ...                             # Additional unit test contracts as needed
+│   ├── Constructor.t.sol               # Constructor and deployment tests
+│   ├── ProposeReservedHats.t.sol       # Proposal creation and reserved hat tests
+│   ├── Approve.t.sol                   # Proposal approval tests
+│   ├── ExecuteApproveAndExecute.t.sol  # Execution and approveAndExecute tests
+│   ├── Escalate.t.sol                  # Proposal escalation tests
+│   ├── Reject.t.sol                    # Proposal rejection tests
+│   ├── Cancel.t.sol                    # Proposal cancellation tests
+│   ├── Withdraw.t.sol                  # Withdrawal functionality tests
+│   ├── Admin.t.sol                     # Admin functions tests
+│   └── View.t.sol                      # View functions and getters tests
 ├── integration/
 │   ├── Integration.t.sol               # E2E happy paths
 │   ├── Chaos.t.sol                     # Random pause/state sequences
@@ -495,7 +589,8 @@ test/
 │   ├── TimeManipulation.t.sol          # Timestamp exploits
 │   ├── StateManipulation.t.sol         # State machine attacks
 │   ├── IntegerBounds.t.sol             # Overflow/underflow edge cases
-│   └── Reentrancy.t.sol                # Reentrancy attempts
+│   ├── Reentrancy.t.sol                # Reentrancy attempts
+│   └── StateConsistency.t.sol          # State consistency and immutability attacks
 ├── gas/
 │   └── GasBenchmarks.t.sol             # Gas cost tracking
 └── helpers/
