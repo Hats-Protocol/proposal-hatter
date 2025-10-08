@@ -150,11 +150,26 @@ contract ForkTestBase is Test {
 
     // Initialize test actors array for fuzz testing
     TEST_ACTORS = [
-      makeAddr("actor1"),   makeAddr("actor2"),   makeAddr("actor3"),   makeAddr("actor4"),
-      makeAddr("actor5"),   makeAddr("actor6"),   makeAddr("actor7"),   makeAddr("actor8"),
-      makeAddr("actor9"),   makeAddr("actor10"),  makeAddr("actor11"),  makeAddr("actor12"),
-      makeAddr("actor13"),  makeAddr("actor14"),  makeAddr("actor15"),  makeAddr("actor16"),
-      makeAddr("actor17"),  makeAddr("actor18"),  makeAddr("actor19"),  makeAddr("actor20")
+      makeAddr("actor1"),
+      makeAddr("actor2"),
+      makeAddr("actor3"),
+      makeAddr("actor4"),
+      makeAddr("actor5"),
+      makeAddr("actor6"),
+      makeAddr("actor7"),
+      makeAddr("actor8"),
+      makeAddr("actor9"),
+      makeAddr("actor10"),
+      makeAddr("actor11"),
+      makeAddr("actor12"),
+      makeAddr("actor13"),
+      makeAddr("actor14"),
+      makeAddr("actor15"),
+      makeAddr("actor16"),
+      makeAddr("actor17"),
+      makeAddr("actor18"),
+      makeAddr("actor19"),
+      makeAddr("actor20")
     ];
 
     // Create test hats tree
@@ -587,12 +602,10 @@ contract ForkTestBase is Test {
 
   /// @dev Helper to get multiple distinct test actors for multi-actor tests
   /// @param seed1 Seed for first actor
-  /// @param seed2 Seed for second actor  
+  /// @param seed2 Seed for second actor
   /// @return actor1 First test actor
   /// @return actor2 Second test actor (guaranteed different from first)
-  function _getTwoTestActors(uint256 seed1, uint256 seed2) 
-    internal view returns (address actor1, address actor2) 
-  {
+  function _getTwoTestActors(uint256 seed1, uint256 seed2) internal view returns (address actor1, address actor2) {
     actor1 = _getTestActor(seed1);
     // Ensure actor2 is different from actor1
     actor2 = _getTestActor(seed2);
@@ -605,14 +618,12 @@ contract ForkTestBase is Test {
   /// @param count Number of actors to return (max 20)
   /// @param startSeed Starting seed for selection
   /// @return actors Array of distinct test actors
-  function _getTestActors(uint256 count, uint256 startSeed) 
-    internal view returns (address[] memory actors) 
-  {
+  function _getTestActors(uint256 count, uint256 startSeed) internal view returns (address[] memory actors) {
     require(count <= TEST_ACTORS.length, "Count exceeds available actors");
-    
+
     actors = new address[](count);
     bool[] memory used = new bool[](TEST_ACTORS.length);
-    
+
     for (uint256 i = 0; i < count; i++) {
       uint256 index = (startSeed + i) % TEST_ACTORS.length;
       // Find next unused actor

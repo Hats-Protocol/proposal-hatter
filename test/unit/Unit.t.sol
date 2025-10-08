@@ -1899,7 +1899,7 @@ contract View_Tests is ForkTestBase {
   ) public view {
     address proposer = _getTestActor(actorSeed);
     address fundingToken = _getFundingToken(tokenSeed);
-    
+
     // Compute ID with test actor and token
     bytes32 id1 = proposalHatter.computeProposalId(
       proposer, fundingAmount, fundingToken, 1 days, primarySafe, recipientHat, "", salt
