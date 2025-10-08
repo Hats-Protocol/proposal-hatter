@@ -90,6 +90,12 @@ contract ForkTestBase is Test {
   /// @dev Hats Protocol instance
   IHats internal hats;
 
+  /// @dev Array of funding tokens for fuzz testing
+  address[4] internal FUNDING_TOKENS;
+
+  /// @dev Array of test actors for fuzz testing (deterministic addresses)
+  address[20] internal TEST_ACTORS;
+
   // Test Accounts (labeled for debugging)
   address internal deployer;
   address internal org;
@@ -98,6 +104,7 @@ contract ForkTestBase is Test {
   address internal executor;
   address internal escalator;
   address internal recipient;
+  address internal approverAdmin;
   address internal maliciousActor;
 
   // Test Hats
@@ -132,20 +139,23 @@ contract ForkTestBase is Test {
     executor = makeAddr("executor");
     escalator = makeAddr("escalator");
     recipient = makeAddr("recipient");
+    approverAdmin = makeAddr("approverAdmin");
     maliciousActor = makeAddr("malicious");
-
-    // Fund accounts with ETH
-    // vm.deal(deployer, 100 ether);
-    // vm.deal(org, 100 ether);
-    // vm.deal(proposer, 10 ether);
-    // vm.deal(approver, 10 ether);
-    // vm.deal(executor, 10 ether);
-    // vm.deal(escalator, 10 ether);
-    // vm.deal(recipient, 10 ether);
-    // vm.deal(maliciousActor, 10 ether);
 
     // Initialize Hats Protocol
     hats = IHats(HATS_PROTOCOL);
+
+    // Initialize funding tokens array for fuzz testing
+    FUNDING_TOKENS = [ETH, USDC, USDT, DAI];
+
+    // Initialize test actors array for fuzz testing
+    TEST_ACTORS = [
+      makeAddr("actor1"),   makeAddr("actor2"),   makeAddr("actor3"),   makeAddr("actor4"),
+      makeAddr("actor5"),   makeAddr("actor6"),   makeAddr("actor7"),   makeAddr("actor8"),
+      makeAddr("actor9"),   makeAddr("actor10"),  makeAddr("actor11"),  makeAddr("actor12"),
+      makeAddr("actor13"),  makeAddr("actor14"),  makeAddr("actor15"),  makeAddr("actor16"),
+      makeAddr("actor17"),  makeAddr("actor18"),  makeAddr("actor19"),  makeAddr("actor20")
+    ];
 
     // Create test hats tree
     _createHatsTree();
@@ -179,8 +189,8 @@ contract ForkTestBase is Test {
     // Create top hat (x)
     topHatId = hats.mintTopHat(org, "Test Top Hat", "");
 
-    // Create approver branch root (x.1)
-    approverBranchId = hats.createHat(topHatId, "Approver Branch Root", 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
+    // Create approver branch root (x.1) with a maxSupply of 2 (for approverAdmin and ProposalHatter)
+    approverBranchId = hats.createHat(topHatId, "Approver Branch Root", 2, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
 
     // Create ops branch root (x.2)
     opsBranchId = hats.createHat(topHatId, "Ops Branch Root", 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
@@ -206,6 +216,7 @@ contract ForkTestBase is Test {
     hats.mintHat(escalatorHat, escalator);
     hats.mintHat(ownerHat, org);
     hats.mintHat(recipientHat, recipient);
+    hats.mintHat(approverBranchId, approverAdmin);
 
     vm.stopPrank();
   }
@@ -307,8 +318,24 @@ contract ForkTestBase is Test {
 
   /// @dev Creates a test proposal with default parameters
   /// @return proposalId The created proposal ID
-  function _createTestProposal() internal returns (bytes32 proposalId) {
+  /// @return expected The expected proposal data
+  function _createTestProposal()
+    internal
+    returns (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expected)
+  {
     return _createTestProposal(1e18, ETH, 0, recipientHat, 0, "", bytes32(0));
+  }
+
+  /// @dev Creates a test proposal with custom timelock
+  /// @param timelockSec Timelock in seconds
+  /// @param salt Salt for uniqueness
+  /// @return proposalId The created proposal ID
+  /// @return expected The expected proposal data
+  function _createTestProposal(uint32 timelockSec, bytes32 salt)
+    internal
+    returns (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expected)
+  {
+    return _createTestProposal(1e18, ETH, timelockSec, recipientHat, 0, "", salt);
   }
 
   /// @dev Creates a test proposal with custom parameters
@@ -320,6 +347,7 @@ contract ForkTestBase is Test {
   /// @param hatsMulticall Hats multicall bytes
   /// @param salt Salt for uniqueness
   /// @return proposalId The created proposal ID
+  /// @return expected The expected proposal data
   function _createTestProposal(
     uint88 fundingAmount,
     address fundingToken,
@@ -328,7 +356,20 @@ contract ForkTestBase is Test {
     uint256 reservedHatId,
     bytes memory hatsMulticall,
     bytes32 salt
-  ) internal returns (bytes32 proposalId) {
+  ) internal returns (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expected) {
+    // Build expected proposal data
+    expected = _buildExpectedProposal(
+      proposer,
+      fundingAmount,
+      fundingToken,
+      timelockSec,
+      recipientHatId,
+      reservedHatId,
+      hatsMulticall,
+      IProposalHatterTypes.ProposalState.Active
+    );
+
+    // Create the proposal
     vm.prank(proposer);
     proposalId = proposalHatter.propose(
       fundingAmount, fundingToken, timelockSec, recipientHatId, reservedHatId, hatsMulticall, salt
@@ -369,7 +410,7 @@ contract ForkTestBase is Test {
   /// @dev Full proposal lifecycle: propose -> approve -> wait -> execute
   /// @return proposalId The executed proposal ID
   function _executeFullProposalLifecycle() internal returns (bytes32 proposalId) {
-    proposalId = _createTestProposal();
+    (proposalId,) = _createTestProposal();
     _approveProposal(proposalId);
     _warpPastETA(proposalId);
     _executeProposal(proposalId);
@@ -388,6 +429,114 @@ contract ForkTestBase is Test {
   /// @return nextId The next child hat ID
   function _getNextHatId(uint256 admin) internal view returns (uint256 nextId) {
     return hats.getNextId(admin);
+  }
+
+  /// @dev Helper to build expected proposal data struct with contract-provided defaults.
+  /// @param submitter The proposal submitter
+  /// @param fundingAmount The funding amount
+  /// @param fundingToken The funding token address
+  /// @param timelockSec The timelock duration
+  /// @param recipientHatId The recipient hat ID
+  /// @param reservedHatId The reserved hat ID (0 if none)
+  /// @param hatsMulticall The hats multicall bytes
+  /// @param state The expected proposal state
+  /// @return expected The expected proposal data with defaults set
+  function _buildExpectedProposal(
+    address submitter,
+    uint88 fundingAmount,
+    address fundingToken,
+    uint32 timelockSec,
+    uint256 recipientHatId,
+    uint256 reservedHatId,
+    bytes memory hatsMulticall,
+    IProposalHatterTypes.ProposalState state
+  ) internal view returns (IProposalHatterTypes.ProposalData memory expected) {
+    return IProposalHatterTypes.ProposalData({
+      submitter: submitter,
+      fundingAmount: fundingAmount,
+      state: state,
+      fundingToken: fundingToken,
+      eta: 0,
+      timelockSec: timelockSec,
+      safe: proposalHatter.safe(),
+      recipientHatId: recipientHatId,
+      approverHatId: _getNextHatId(proposalHatter.APPROVER_BRANCH_ID()),
+      reservedHatId: reservedHatId,
+      hatsMulticall: hatsMulticall
+    });
+  }
+
+  /// @dev Helper to assert that a hat was created correctly
+  /// @param hatId The hat ID to check
+  /// @param expectedAdmin The expected admin hat ID
+  /// @param expectedDetails The expected details string
+  function _assertHatCreated(uint256 hatId, uint256 expectedAdmin, string memory expectedDetails) internal view {
+    // Get hat data
+    (
+      string memory details,
+      uint32 maxSupply,
+      uint32 supply,
+      address eligibility,
+      address toggle,
+      ,
+      , // skip imageURI and lastHatId (imageURI may have default value from Hats Protocol)
+      bool mutable_,
+      bool active
+    ) = hats.viewHat(hatId);
+
+    // Verify hat properties
+    assertEq(details, expectedDetails, "Hat details mismatch");
+    assertEq(maxSupply, 1, "Max supply should be 1");
+    assertEq(supply, 0, "Supply should be 0 (not minted yet)");
+    assertEq(eligibility, EMPTY_SENTINEL, "Eligibility should be EMPTY_SENTINEL");
+    assertEq(toggle, EMPTY_SENTINEL, "Toggle should be EMPTY_SENTINEL");
+    assertTrue(mutable_, "Hat should be mutable");
+    assertTrue(active, "Hat should be active");
+
+    // Verify it's a child of the expected admin
+    assertEq(hats.getHatLevel(hatId), hats.getHatLevel(expectedAdmin) + 1, "Hat should be child of admin");
+  }
+
+  /// @dev Helper to assert that a hat was toggled correctly
+  /// @param hatId The hat ID to check
+  /// @param toggle The expected toggle module
+  /// @param active The expected hat status
+  function _assertHatToggle(uint256 hatId, address toggle, bool active) internal view {
+    (,,,, address toggle_,,,, bool active_) = hats.viewHat(hatId);
+    assertEq(toggle_, toggle, "Hat toggle module mismatch");
+    assertEq(active_, active, "Hat status mismatch");
+  }
+
+  /// @dev Helper to get proposal data as a struct
+  /// @param proposalId The proposal ID to fetch
+  /// @return data The proposal data struct
+  function _getProposalData(bytes32 proposalId) internal view returns (IProposalHatterTypes.ProposalData memory data) {
+    // Fetch in two calls to avoid stack depth issues
+    (data.submitter, data.fundingAmount, data.state, data.fundingToken, data.eta, data.timelockSec,,,,,) =
+      proposalHatter.proposals(proposalId);
+
+    (,,,,,, data.safe, data.recipientHatId, data.approverHatId, data.reservedHatId, data.hatsMulticall) =
+      proposalHatter.proposals(proposalId);
+  }
+
+  /// @dev Helper to assert proposal data matches expectations
+  /// @param actual The actual proposal data
+  /// @param expected The expected proposal data
+  function _assertProposalData(
+    IProposalHatterTypes.ProposalData memory actual,
+    IProposalHatterTypes.ProposalData memory expected
+  ) internal pure {
+    assertEq(actual.submitter, expected.submitter, "Submitter mismatch");
+    assertEq(actual.fundingAmount, expected.fundingAmount, "Funding amount mismatch");
+    assertEq(uint8(actual.state), uint8(expected.state), "State mismatch");
+    assertEq(actual.fundingToken, expected.fundingToken, "Funding token mismatch");
+    assertEq(actual.eta, expected.eta, "ETA mismatch");
+    assertEq(actual.timelockSec, expected.timelockSec, "Timelock mismatch");
+    assertEq(actual.safe, expected.safe, "Safe mismatch");
+    assertEq(actual.recipientHatId, expected.recipientHatId, "Recipient hat mismatch");
+    assertEq(actual.approverHatId, expected.approverHatId, "Approver hat mismatch");
+    assertEq(actual.reservedHatId, expected.reservedHatId, "Reserved hat mismatch");
+    assertEq(actual.hatsMulticall, expected.hatsMulticall, "Hats multicall mismatch");
   }
 
   /// @dev Helper to check if an address wears a hat
@@ -419,6 +568,59 @@ contract ForkTestBase is Test {
       vm.deal(to, amount);
     } else {
       deal(token, to, amount);
+    }
+  }
+
+  /// @dev Helper to get a funding token by index for fuzz testing
+  /// @param tokenSeed Seed to select token (will be modulo'd by array length)
+  /// @return token The selected funding token address
+  function _getFundingToken(uint256 tokenSeed) internal view returns (address token) {
+    return FUNDING_TOKENS[tokenSeed % FUNDING_TOKENS.length];
+  }
+
+  /// @dev Helper to get a test actor by index for fuzz testing
+  /// @param actorSeed Seed to select actor (will be modulo'd by array length)
+  /// @return actor The selected test actor address
+  function _getTestActor(uint256 actorSeed) internal view returns (address actor) {
+    return TEST_ACTORS[actorSeed % TEST_ACTORS.length];
+  }
+
+  /// @dev Helper to get multiple distinct test actors for multi-actor tests
+  /// @param seed1 Seed for first actor
+  /// @param seed2 Seed for second actor  
+  /// @return actor1 First test actor
+  /// @return actor2 Second test actor (guaranteed different from first)
+  function _getTwoTestActors(uint256 seed1, uint256 seed2) 
+    internal view returns (address actor1, address actor2) 
+  {
+    actor1 = _getTestActor(seed1);
+    // Ensure actor2 is different from actor1
+    actor2 = _getTestActor(seed2);
+    if (actor1 == actor2) {
+      actor2 = _getTestActor(seed2 + 1);
+    }
+  }
+
+  /// @dev Helper to get a random subset of test actors
+  /// @param count Number of actors to return (max 20)
+  /// @param startSeed Starting seed for selection
+  /// @return actors Array of distinct test actors
+  function _getTestActors(uint256 count, uint256 startSeed) 
+    internal view returns (address[] memory actors) 
+  {
+    require(count <= TEST_ACTORS.length, "Count exceeds available actors");
+    
+    actors = new address[](count);
+    bool[] memory used = new bool[](TEST_ACTORS.length);
+    
+    for (uint256 i = 0; i < count; i++) {
+      uint256 index = (startSeed + i) % TEST_ACTORS.length;
+      // Find next unused actor
+      while (used[index]) {
+        index = (index + 1) % TEST_ACTORS.length;
+      }
+      used[index] = true;
+      actors[i] = TEST_ACTORS[index];
     }
   }
 }
