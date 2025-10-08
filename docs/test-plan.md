@@ -60,7 +60,6 @@ invariant = { runs = 10, depth = 10 }
 - Defined in `setUp()`:
   - `deployer`: makeAddr("deployer") – Deploys ProposalHatter.
   - `org`: makeAddr("org") – Wears top hat; represents the organization.
-  - `proposalHatterWearer`: makeAddr("proposalHatter") – Wears approver/ops branch roots (simulates ProposalHatter as admin).
   - `proposer`: makeAddr("proposer") – Wears proposer hat.
   - `approver`: makeAddr("approver") – Receives per-proposal approver ticket hats.
   - `executor`: makeAddr("executor") – Wears executor hat (or test public execution).
@@ -107,59 +106,153 @@ invariant = { runs = 10, depth = 10 }
 Unit tests isolate functions/features, using fuzzing for parametric inputs (e.g., funding amounts). Prefix: `test_[RevertIf/When]_Condition`. Use `vm.expectRevert`, `bound`, `vm.assume`. Structure like Sablier's unit tests (e.g., positive/negative cases per function).
 
 - **Deployment/Constructor**:
-  - test_DeployWithValidParams: Verify immutables (HATS_PROTOCOL_ADDRESS, OWNER_HAT, etc.), events emitted.
-  - test_RevertIf_ZeroAddress: Fuzz invalid inputs (zero hats/Safe).
+  - test_DeployWithValidParams: Verify immutables (HATS_PROTOCOL_ADDRESS, OWNER_HAT, etc.), mutable variables, and events emitted (ProposalHatterDeployed, role hat set events, SafeSet).
+  - test_RevertIf_ZeroHatsProtocol: Specifically test hatsProtocol = address(0).
+  - test_RevertIf_ZeroSafe: Specifically test safe = address(0).
+  - test_RevertIf_ZeroOwnerHat: Specifically test ownerHat = 0.
+  - test_DeployWithZeroOpsBranchId: opsBranchId = 0 is valid (disables branch check).
   - testFuzz_DeployWithRoles: Fuzz hat IDs, verify storage.
 
 - **Propose**:
-  - test_ProposeValid: Create proposal, verify ID determinism, approver hat creation, reserved hat (if set), event.
+  - test_ProposeValid: Create proposal, verify proposal ID determinism, approver hat created under APPROVER_BRANCH_ID, proposal data stored correctly (including p.safe = current safe), and Proposed event emitted with correct parameters.
   - test_RevertIf_NotProposer: Unauthorized caller.
   - test_RevertIf_ProposalsPaused: After owner pauses.
-  - testFuzz_ProposeWithParams: Fuzz fundingAmount (uint88 bounds), token, timelock, hatsMulticall, salt; verify ID hash.
+  - testFuzz_ProposeWithParams: Fuzz fundingAmount (uint88 bounds), token, timelock, hatsMulticall, salt; verify proposal created.
   - test_ProposeFundingOnly: Empty hatsMulticall.
+  - test_ProposeRolesOnly: Empty fundingAmount, fundingToken.
   - test_RevertIf_DuplicateProposal: Same inputs/salt.
-  - test_ProposalStoresSafeAddress: Verify p.safe captured at propose-time equals current safe.
-  - test_ProposalIdIncludesChainId: Verify block.chainid in hash for replay protection.
-  - test_ProposalIdIncludesSafe: Different Safes with same other params yield different IDs.
+  - testFuzz_ProposeFundingAmountBoundary: Test full uint88 range.
 
-- **Approve/ApproveAndExecute**:
+- **Reserved Hat**:
+  - test_ProposeWithReservedHat: Create proposal with valid reservedHatId, verify hat created. Then test lifecycle: execute keeps it active, reject/cancel toggle it off.
+  - test_RevertIf_InvalidReservedHatId: ReservedHatId doesn't match getNextId(admin).
+  - test_RevertIf_InvalidReservedHatBranch: ReservedHat admin not in OPS_BRANCH_ID when OPS_BRANCH_ID != 0.
+  - test_ProposeWithoutReservedHat: reservedHatId = 0, verify no hat created.
+
+- **Approve**:
   - test_ApproveActiveProposal: Sets ETA, state to Approved, event.
   - test_RevertIf_NotApprover: Non-wearer.
-  - test_ApproveAndExecuteZeroTimelock: Atomic approve+execute.
   - testFuzz_ApproveTimelock: Fuzz timelockSec, verify ETA.
+  - test_RevertIf_Approve_None: Try to approve a proposal that doesn't exist.
+  - test_RevertIf_Approve_AlreadyApproved: Approve twice, second should revert with InvalidState.
+  - test_RevertIf_Approve_Executed: Try to approve an executed proposal.
+  - test_RevertIf_Approve_Escalated: Try to approve an escalated proposal.
+  - test_RevertIf_Approve_Canceled: Try to approve a canceled proposal.
+  - test_RevertIf_Approve_Rejected: Try to approve a rejected proposal.
+
+- **ApproveAndExecute**:
+  - test_ApproveAndExecuteZeroTimelock: Atomic approve+execute.
+  - test_RevertIf_NonZeroTimelock: Should revert if timelock != 0.
+  - test_RevertIf_NotApprover: Non-approver tries approveAndExecute.
+  - test_RevertIf_NotExecutor: When executorHat != PUBLIC_SENTINEL, non-executor reverts.
+  - test_RevertIf_ApproveAndExecute_None: Try to approve and execute a proposal that doesn't exist.
+  - test_RevertIf_ApproveAndExecute_Approved: Try to approve and execute an approved proposal.
+  - test_RevertIf_ApproveAndExecute_Executed: Try to approve and execute an executed proposal.
+  - test_RevertIf_ApproveAndExecute_Canceled: Try to approve and execute a canceled proposal.
+  - test_RevertIf_ApproveAndExecute_Rejected: Try to approve and execute a rejected proposal.
+  - test_RevertIf_ApproveAndExecute_ProposalsPaused: Pause check.
 
 - **Execute**:
-  - test_ExecuteApprovedAfterETA: Increases allowance, calls multicall (if set), state to Executed, event.
-  - test_RevertIf_TooEarly/BadState/NotExecutor: Timing/state/auth checks.
+  - test_ExecuteApprovedAfterETA: Full execution flow - verify allowance increased correctly, state changed to Executed, and Executed event emitted.
+  - test_RevertIf_TooEarly: Timing check.
+  - test_RevertIf_NotExecutor: Auth check.
   - testFuzz_ExecuteAllowance: Fuzz fundingAmount near uint88.max, check overflow revert.
-  - test_ExecuteUsesProposalSafe: Allowance recorded for p.safe, not global safe.
-  - test_HatsMulticallDeleted: After execute with non-empty multicall, verify p.hatsMulticall is empty.
-  - test_HatsMulticallPreservedIfEmpty: After execute with empty multicall, verify p.hatsMulticall remains empty (no unnecessary delete).
+  - test_ExecuteUsesProposalSafe: Allowance recorded for p.safe, not global safe (important security property).
+  - test_ExecuteAtExactETA: block.timestamp == p.eta should succeed (uses >= check).
+  - test_ExecuteWithMulticall: Non-empty hatsMulticall, verify multicall is executed and hatsMulticall storage is deleted after execution.
+  - test_ExecuteWithoutMulticall: Empty hatsMulticall, verify no multicall executed and hatsMulticall storage remains empty.
+  - test_RevertIf_MulticallFails: Hats multicall reverts, entire tx should revert (atomicity).
+  - test_RevertIf_Execute_None: Try to execute a proposal that doesn't exist.
+  - test_RevertIf_Execute_Escalated: Cannot execute escalated proposal.
+  - test_RevertIf_Execute_Canceled: Cannot execute canceled proposal.
+  - test_RevertIf_Execute_Rejected: Cannot execute rejected proposal.
+  - test_RevertIf_Execute_AlreadyExecuted: Cannot execute twice.
 
-- **Escalate/Reject/Cancel**:
-  - test_EscalateActive/Approved: Sets state, event; blocks execute.
-  - test_RevertIf_NotEscalator/BadState.
-  - test_RejectActive: Sets state, toggles reserved hat off.
-  - test_CancelPreExecution: By submitter, toggles reserved hat.
+- **Public Execution**:
+  - test_ExecutePublic: Set executorHat to PUBLIC_SENTINEL, verify anyone can execute.
+  - test_ApproveAndExecutePublic: Public execution for approveAndExecute.
+  - test_RevertIf_Execute_NotPublicAndNotExecutor: When executorHat != PUBLIC_SENTINEL, non-executor reverts.
+
+- **Escalate**:
+  - test_EscalateActive: Sets state, event; blocks execute.
+  - test_EscalateApproved: Sets state, event; blocks execute.
+  - test_RevertIf_NotEscalator: Auth check.
+  - test_RevertIf_Escalate_None: Try to escalate a proposal that doesn't exist.
+  - test_RevertIf_Escalate_Escalated: Try to escalate an escalated proposal.
+  - test_RevertIf_Escalate_Canceled: Try to escalate a canceled proposal.
+  - test_RevertIf_Escalate_Rejected: Try to escalate a rejected proposal.
+  - test_EscalateDoesNotCheckPause: Escalate works even when proposals paused (by design).
+
+- **Reject**:
+  - test_RejectActive: Reject proposal with reserved hat, verify state changes to Rejected, reserved hat is toggled off (if reservedHatId != 0), and Rejected event emitted.
+  - test_RevertIf_Reject_NotApprover: Only approver ticket holder can reject.
+  - test_RevertIf_Reject_None: Try to reject a proposal that doesn't exist.
+  - test_RevertIf_Reject_Approved: Try to reject an approved proposal.
+  - test_RevertIf_Reject_Escalated: Try to reject an escalated proposal.
+  - test_RevertIf_Reject_Canceled: Try to reject a canceled proposal.
+  - test_RevertIf_Reject_Rejected: Try to reject a rejected proposal.
+  - test_RejectWithoutReservedHat: Reject when reservedHatId = 0, should succeed.
+  - test_RejectDoesNotCheckPause: Reject works even when proposals paused (by design).
+
+- **Cancel**:
+  - test_CancelActive: Cancel proposal with reserved hat, verify state changes to Canceled, reserved hat is toggled off (if reservedHatId != 0), and Canceled event emitted.
+  - test_CancelApproved: Submitter can cancel approved proposals, verify state changes to Canceled, reserved hat is toggled off (if reservedHatId != 0), and Canceled event emitted.
+  - test_RevertIf_Cancel_NotSubmitter: Auth check.
+  - test_CancelWithoutReservedHat: Cancel when reservedHatId = 0, should succeed.
+  - test_RevertIf_Cancel_None: Try to cancel a proposal that doesn't exist.
+  - test_RevertIf_Cancel_Executed: Try to cancel an executed proposal.
+  - test_RevertIf_Cancel_Escalated: Try to cancel an escalated proposal.
+  - test_RevertIf_Cancel_Rejected: Try to cancel a rejected proposal.
+  - test_RevertIf_Cancel_Canceled: Try to cancel an already canceled proposal.
+  - test_CancelDoesNotCheckPause: Cancel works even when proposals paused (by design).
 
 - **Withdraw**:
   - test_WithdrawValid: Decrements allowance, executes Safe transfer (ETH/ERC20), event.
-  - test_RevertIf_NotRecipient/InsufficientAllowance/Paused/SafeFailure.
+  - test_RevertIf_NotRecipient: Auth check.
+  - test_RevertIf_InsufficientAllowance: Allowance check.
+  - test_RevertIf_Paused: Pause check.
+  - test_RevertIf_SafeFailure: Safe execution failure.
   - testFuzz_WithdrawAmount: Fuzz amount <= allowance, verify post-balance.
   - test_WithdrawUsesParameterSafe: Module call targets the safe_ parameter, not global safe.
   - test_ERC20_NoReturn: USDT-style token (0 bytes return) should succeed.
   - test_RevertIf_ERC20_ReturnsFalse: Token returns `false` should revert with ERC20TransferReturnedFalse.
   - test_RevertIf_ERC20_MalformedReturn: Return data not exactly 32 bytes should revert with ERC20TransferMalformedReturn.
   - test_ERC20_ExactlyTrue: Token returns exactly 32 bytes = `true` should succeed.
+  - test_WithdrawETH: Specifically test ETH withdrawal.
+  - test_WithdrawERC20: Specifically test ERC20 withdrawal.
+  - test_WithdrawMultipleTimes: Partial withdrawals until allowance exhausted.
+  - test_WithdrawFromSecondaryAccount: Multiple addresses wearing same hat can withdraw.
 
 - **Admin Functions**:
-  - test_SetRoles/Pauses/Safe: Owner-only, events, storage updates.
-  - test_RevertIf_NotOwner/ZeroSafe.
+  - test_SetProposerHat: Owner sets proposer hat, verify event + storage.
+  - test_RevertIf_SetProposerHat_NotOwner: Non-owner cannot set.
+  - test_SetExecutorHat: Owner sets executor hat, verify event + storage.
+  - test_RevertIf_SetExecutorHat_NotOwner: Non-owner cannot set.
+  - test_SetEscalatorHat: Owner sets escalator hat, verify event + storage.
+  - test_RevertIf_SetEscalatorHat_NotOwner: Non-owner cannot set.
+  - test_SetSafe: Owner sets safe, verify event + storage.
+  - test_RevertIf_SetSafe_NotOwner: Non-owner cannot set.
+  - test_RevertIf_SetSafe_ZeroAddress: Cannot set safe to address(0).
+  - test_PauseProposals: Owner pauses proposals, verify event + storage.
+  - test_UnpauseProposals: Owner unpauses proposals.
+  - test_RevertIf_PauseProposals_NotOwner: Non-owner cannot pause.
+  - test_PauseWithdrawals: Owner pauses withdrawals, verify event + storage.
+  - test_UnpauseWithdrawals: Owner unpauses withdrawals.
+  - test_RevertIf_PauseWithdrawals_NotOwner: Non-owner cannot pause.
   - test_SafeMigrationIsolation: Change global safe via setSafe(), verify existing proposals use original p.safe.
 
 - **Views**:
   - test_AllowanceOf: Matches internal ledger for correct (safe, hatId, token) tuple.
-  - test_ComputeProposalId: Matches on-chain hash, includes all expected parameters.
+  - test_ComputeProposalId_MatchesOnChain: Compare computeProposalId() with actual proposal creation.
+  - test_ComputeProposalId_Determinism: Same inputs = same ID when called multiple times.
+  - test_ComputeProposalId_DifferentSubmitters: Same params, different submitters = different IDs.
+  - test_ComputeProposalId_IncludesChainId: Verify chainid in hash for replay protection.
+  - test_ComputeProposalId_IncludesSafe: Different Safes with same other params = different IDs.
+  - test_ComputeProposalId_IncludesContractAddress: Verify address(this) in hash.
+  - test_ComputeProposalId_IncludesHatsProtocol: Verify HATS_PROTOCOL_ADDRESS in hash.
+  - testFuzz_ComputeProposalId_AllParams: Fuzz all non-address parameters, verify determinism and uniqueness.
+  - test_ComputeProposalId_ChangingEachParam: Change each param individually, verify different IDs each time.
+  - test_ComputeProposalId_EmptyVsNonEmptyMulticall: Empty hatsMulticall vs non-empty = different IDs.
   - test_GetProposalState: Returns correct state for various proposal IDs.
 
 Fuzz Config: Use `bound` for ranges (e.g., `fundingAmount = bound(amount, 1, type(uint88).max)`); `vm.assume` for valid states (e.g., `assume(proposal.state == Active)`).
