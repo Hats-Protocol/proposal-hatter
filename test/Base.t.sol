@@ -4,10 +4,11 @@ pragma solidity ^0.8.30;
 import { Test } from "forge-std/Test.sol";
 import { Deploy } from "../script/Deploy.s.sol";
 import { ProposalHatter } from "../src/ProposalHatter.sol";
+import { ProposalHatterHarness } from "./harness/ProposalHatterHarness.sol";
 import { IProposalHatterTypes } from "../src/interfaces/IProposalHatter.sol";
+import { IMulticallable } from "../src/interfaces/IMulticallable.sol";
 import { IHats } from "../lib/hats-protocol/src/Interfaces/IHats.sol";
 import { IERC20 } from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import { TestHelpers } from "./helpers/TestHelpers.sol";
 
 interface ISafe {
   function setup(
@@ -189,9 +190,7 @@ contract ForkTestBase is Test {
     vm.stopPrank();
 
     // Enable ProposalHatter as module on primary, secondary and underfunded Safes (org is the owner)
-    _enableModuleOnSafe(primarySafe, address(proposalHatter));
-    _enableModuleOnSafe(secondarySafe, address(proposalHatter));
-    _enableModuleOnSafe(underfundedSafe, address(proposalHatter));
+    _enableSafeModules();
   }
 
   // --------------------
@@ -293,7 +292,7 @@ contract ForkTestBase is Test {
 
   /// @dev Deploys ProposalHatter contract using the Deploy script
   /// @notice This ensures tests validate the actual deployment script
-  function _deployProposalHatter() internal {
+  function _deployProposalHatter() internal virtual {
     vm.startPrank(deployer);
 
     // Instantiate the Deploy script
@@ -326,6 +325,14 @@ contract ForkTestBase is Test {
     // This simulates the module being enabled via Safe's execTransaction
     vm.prank(safe);
     ISafe(safe).enableModule(module);
+  }
+
+  function _enableSafeModules() internal virtual {
+    address module = address(proposalHatter);
+
+    _enableModuleOnSafe(primarySafe, module);
+    _enableModuleOnSafe(secondarySafe, module);
+    _enableModuleOnSafe(underfundedSafe, module);
   }
 
   // --------------------
@@ -629,16 +636,56 @@ contract ForkTestBase is Test {
     }
   }
 
-  /// @dev Construct a hatsMulticall payload that creates a single hat with standard defaults.
+  /// @dev Builds a valid Hats multicall payload with the correct selector.
+  /// @param calls The array of ABI-encoded calls to include in the multicall.
+  /// @return hatsMulticall The encoded multicall bytes ready for proposal storage.
+  function _buildValidMulticall(bytes[] memory calls) internal pure returns (bytes memory hatsMulticall) {
+    return abi.encodeWithSelector(IMulticallable.multicall.selector, calls);
+  }
+
+  /// @dev Construct a hatsMulticall payload that creates a single hat with configurable defaults.
   /// @param adminHatId The admin hat ID for the new hat.
   /// @param details The details string for the new hat.
+  /// @param maxSupply The maximum supply for the new hat.
   /// @return hatsMulticall Encoded bytes ready for proposal storage.
+  function _buildSingleHatCreationMulticall(uint256 adminHatId, string memory details, uint32 maxSupply)
+    internal
+    pure
+    returns (bytes memory hatsMulticall)
+  {
+    bytes[] memory calls = new bytes[](1);
+    calls[0] = abi.encodeWithSelector(
+      IHats.createHat.selector, adminHatId, details, maxSupply, EMPTY_SENTINEL, EMPTY_SENTINEL, true, ""
+    );
+    return _buildValidMulticall(calls);
+  }
+
+  /// @dev Convenience overload using the default max supply of 1.
   function _buildSingleHatCreationMulticall(uint256 adminHatId, string memory details)
     internal
     pure
     returns (bytes memory hatsMulticall)
   {
-    return TestHelpers.singleHatCreationMulticall(adminHatId, details);
+    return _buildSingleHatCreationMulticall(adminHatId, details, 1);
+  }
+
+  /// @dev Construct a hatsMulticall payload that creates three sibling hats with standard defaults.
+  /// @param adminHatId The admin hat ID for the new hats.
+  /// @param details The details string for each of the new hats.
+  /// @return hatsMulticall Encoded bytes ready for proposal storage.
+  function _buildThreeSiblingHatCreationMulticall(uint256 adminHatId, string memory details)
+    internal
+    pure
+    returns (bytes memory hatsMulticall)
+  {
+    bytes[] memory calls = new bytes[](3);
+    calls[0] =
+      abi.encodeWithSelector(IHats.createHat.selector, adminHatId, details, 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
+    calls[1] =
+      abi.encodeWithSelector(IHats.createHat.selector, adminHatId, details, 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
+    calls[2] =
+      abi.encodeWithSelector(IHats.createHat.selector, adminHatId, details, 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, "");
+    return _buildValidMulticall(calls);
   }
 
   /// @dev Create and approve a proposal that will create a single hat during execution.
@@ -734,5 +781,23 @@ contract ForkTestBase is Test {
       used[index] = true;
       actors[i] = TEST_ACTORS[index];
     }
+  }
+}
+
+contract HarnessTestBase is ForkTestBase {
+  ProposalHatterHarness internal proposalHatterHarness;
+
+  function _deployProposalHatter() internal override {
+    proposalHatterHarness = new ProposalHatterHarness(
+      HATS_PROTOCOL, primarySafe, ownerHat, proposerHat, executorHat, escalatorHat, approverBranchId, opsBranchId
+    );
+  }
+
+  function _enableSafeModules() internal override {
+    address module = address(proposalHatterHarness);
+
+    _enableModuleOnSafe(primarySafe, module);
+    _enableModuleOnSafe(secondarySafe, module);
+    _enableModuleOnSafe(underfundedSafe, module);
   }
 }

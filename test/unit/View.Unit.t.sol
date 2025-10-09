@@ -287,10 +287,11 @@ contract View_Tests is ForkTestBase {
     );
 
     // Change multicall
+    bytes memory multicall = _buildSingleHatCreationMulticall(approverBranchId, "Details");
     assertTrue(
       baseId
         != proposalHatter.computeProposalId(
-          proposer, 1 ether, ETH, 1 days, primarySafe, recipientHat, hex"1234", bytes32(uint256(1))
+          proposer, 1 ether, ETH, 1 days, primarySafe, recipientHat, multicall, bytes32(uint256(1))
         ),
       "Changing multicall should change ID"
     );
@@ -312,7 +313,7 @@ contract View_Tests is ForkTestBase {
     );
 
     // Compute ID with non-empty multicall
-    bytes memory nonEmptyMulticall = hex"1234567890abcdef";
+    bytes memory nonEmptyMulticall = _buildSingleHatCreationMulticall(approverBranchId, "Details");
     bytes32 idNonEmpty = proposalHatter.computeProposalId(
       proposer, 1 ether, ETH, 1 days, primarySafe, recipientHat, nonEmptyMulticall, bytes32(uint256(1))
     );

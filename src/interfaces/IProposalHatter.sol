@@ -46,10 +46,12 @@ interface IProposalHatterErrors is IProposalHatterTypes {
   error AllowanceExceeded(uint256 remaining, uint256 requested);
   error AlreadyUsed(bytes32 proposalId);
   error ZeroAddress();
+  error InvalidMulticall();
   error InvalidReservedHatId();
   error InvalidReservedHatBranch();
   error ProposalsArePaused();
   error WithdrawalsArePaused();
+  error HatsMulticallFailed(bytes returnData);
   error SafeExecutionFailed(bytes returnData);
   error ERC20TransferReturnedFalse(address token, bytes returnData);
   error ERC20TransferMalformedReturn(address token, bytes returnData);
@@ -184,7 +186,8 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
   /// @return remaining Remaining allowance amount.
   function allowanceOf(address safe, uint256 hatId, address token) external view returns (uint88 remaining);
 
-  /// @notice Compute proposalId for given inputs (for pre-call checks/UI display).
+  /// @notice Compute proposalId for given inputs (for pre-call checks/UI display). Reverts if the hatsMulticall is
+  /// invalid.
   /// @dev Includes `msg.sender` in the hash to prevent front-running by other submitters.
   /// @param submitter The address that proposed.
   /// @param fundingAmount Funding amount to be added on execution.
@@ -205,6 +208,12 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
     bytes calldata hatsMulticall,
     bytes32 salt
   ) external view returns (bytes32);
+
+  /// @notice Helper function to decode a multicall from raw bytes.
+  /// @dev Useful for try-catch validation of multicall payloads.
+  /// @param rawBytes The raw bytes to decode.
+  /// @return decoded The decoded bytes.
+  function decodeMulticallPayload(bytes calldata rawBytes) external pure returns (bytes[] memory);
 
   // ---- Storage getters ----
   /// @notice Proposal data by id.

@@ -135,14 +135,28 @@ Unit tests isolate functions/features, using fuzzing for parametric inputs (e.g.
   - testFuzz_DeployWithRoles: Fuzz hat IDs, verify storage.
 
 - **Propose**:
-  - test_ProposeValid: Create proposal, verify proposal ID determinism, approver hat created under APPROVER_BRANCH_ID, proposal data stored correctly (including p.safe = current safe), and Proposed event emitted with correct parameters.
+  - test_ProposeValid: Create proposal with valid multicall payload, verify proposal ID determinism, approver hat created under APPROVER_BRANCH_ID, proposal data stored correctly (including p.safe = current safe), and Proposed event emitted with correct parameters.
   - test_RevertIf_NotProposer: Unauthorized caller.
   - test_RevertIf_ProposalsPaused: After owner pauses.
-  - testFuzz_ProposeWithParams: Fuzz fundingAmount (uint88 bounds), token, timelock, hatsMulticall, salt; verify proposal created.
-  - test_ProposeFundingOnly: Empty hatsMulticall.
-  - test_ProposeRolesOnly: Empty fundingAmount, fundingToken.
+  - test_RevertIf_InvalidMulticall_WrongSelector: Multicall with wrong function selector reverts with InvalidMulticall.
+  - test_RevertIf_InvalidMulticall_TooShort: Multicall with <4 bytes reverts with InvalidMulticall.
+  - test_RevertIf_InvalidMulticall_NotDecodable: Multicall with valid selector but invalid ABI encoding reverts with InvalidMulticall.
+  - testFuzz_ProposeWithParams: Fuzz fundingAmount (uint88 bounds), token, timelock, valid hatsMulticall, salt; verify proposal created.
+  - test_ProposeFundingOnly: Empty hatsMulticall (no roles multicall, funding only).
+  - test_ProposeRolesOnly: Valid multicall with zero fundingAmount (roles only, no funding).
   - test_RevertIf_DuplicateProposal: Same inputs/salt.
   - testFuzz_ProposeFundingAmountBoundary: Test full uint88 range.
+
+- **Multicall Validation** (decodeMulticallPayload and _checkMulticall):
+  - test_DecodeMulticallPayload_ValidSingle: Decode valid single-element bytes[] payload.
+  - test_DecodeMulticallPayload_ValidMultiple: Decode valid multi-element bytes[] payload.
+  - test_DecodeMulticallPayload_ValidEmpty: Decode valid empty bytes[] payload.
+  - test_RevertIf_DecodeMulticallPayload_Invalid: Malformed ABI encoding reverts.
+  - test_CheckMulticall_EmptyBytes: Empty bytes returns bytes32(0)
+  - test_CheckMulticall_ValidPayload: Valid selector + decodable payload returns hash
+  - test_RevertIf_CheckMulticall_TooShort: <4 bytes reverts with InvalidMulticall
+  - test_RevertIf_CheckMulticall_WrongSelector: Non-multicall selector reverts with InvalidMulticall
+  - test_RevertIf_CheckMulticall_InvalidPayload: Valid selector but undecodable payload reverts with InvalidMulticall
 
 - **Reserved Hat**:
   - test_ProposeWithReservedHat: Create proposal with valid reservedHatId, verify hat created. Then test lifecycle: execute keeps it active, reject/cancel toggle it off.
@@ -180,9 +194,9 @@ Unit tests isolate functions/features, using fuzzing for parametric inputs (e.g.
   - testFuzz_ExecuteAllowance: Fuzz fundingAmount near uint88.max, check overflow revert.
   - test_ExecuteUsesProposalSafe: Allowance recorded for p.safe, not global safe (important security property).
   - test_ExecuteAtExactETA: block.timestamp == p.eta should succeed (uses >= check).
-  - test_ExecuteWithMulticall: Non-empty hatsMulticall, verify multicall is executed and hatsMulticall storage is deleted after execution.
+  - test_ExecuteWithValidMulticall: Non-empty valid hatsMulticall, verify low-level call executes correctly and hatsMulticall storage is deleted after execution.
   - test_ExecuteWithoutMulticall: Empty hatsMulticall, verify no multicall executed and hatsMulticall storage remains empty.
-  - test_RevertIf_MulticallFails: Hats multicall reverts, entire tx should revert (atomicity).
+  - test_RevertIf_Execute_MulticallRevertsBubbled: Hats multicall reverts, entire tx should revert with HatsMulticallFailed (atomicity).
   - test_RevertIf_Execute_None: Try to execute a proposal that doesn't exist.
   - test_RevertIf_Execute_Escalated: Cannot execute escalated proposal.
   - test_RevertIf_Execute_Canceled: Cannot execute canceled proposal.
@@ -264,16 +278,18 @@ Unit tests isolate functions/features, using fuzzing for parametric inputs (e.g.
 
 - **Views**:
   - test_AllowanceOf: Matches internal ledger for correct (safe, hatId, token) tuple.
-  - test_ComputeProposalId_MatchesOnChain: Compare computeProposalId() with actual proposal creation.
-  - test_ComputeProposalId_Determinism: Same inputs = same ID when called multiple times.
+  - test_ComputeProposalId_MatchesOnChain: Compare computeProposalId() with actual proposal creation using valid multicall.
+  - test_ComputeProposalId_Determinism: Same inputs (including same multicall bytes) = same ID when called multiple times.
+  - test_ComputeProposalId_DifferentMulticalls: Different valid multicall payloads = different IDs.
+  - test_ComputeProposalId_EmptyVsNonEmptyMulticall: Empty hatsMulticall vs non-empty = different IDs (hash differs: bytes32(0) vs actual hash).
+  - test_RevertIf_ComputeProposalId_InvalidMulticall: Invalid multicall causes revert with InvalidMulticall (validation happens in computeProposalId).
   - test_ComputeProposalId_DifferentSubmitters: Same params, different submitters = different IDs.
   - test_ComputeProposalId_IncludesChainId: Verify chainid in hash for replay protection.
   - test_ComputeProposalId_IncludesSafe: Different Safes with same other params = different IDs.
   - test_ComputeProposalId_IncludesContractAddress: Verify address(this) in hash.
   - test_ComputeProposalId_IncludesHatsProtocol: Verify HATS_PROTOCOL_ADDRESS in hash.
-  - testFuzz_ComputeProposalId_AllParams: Fuzz all non-address parameters, verify determinism and uniqueness.
-  - test_ComputeProposalId_ChangingEachParam: Change each param individually, verify different IDs each time.
-  - test_ComputeProposalId_EmptyVsNonEmptyMulticall: Empty hatsMulticall vs non-empty = different IDs.
+  - testFuzz_ComputeProposalId_AllParams: Fuzz all non-address parameters with valid multicalls, verify determinism and uniqueness.
+  - test_ComputeProposalId_ChangingEachParam: Change each param individually (including multicall), verify different IDs each time.
   - test_GetProposalState: Returns correct state for various proposal IDs.
 
 Fuzz Config: Use `bound` for ranges (e.g., `fundingAmount = bound(amount, 1, type(uint88).max)`); `vm.assume` for valid states (e.g., `assume(proposal.state == Active)`).
@@ -294,6 +310,12 @@ E2E tests simulate full lifecycles on fork, verifying interactions with real Hat
   - testFork_SafeMigration: Set new Safe, verify old allowances persist but fail if module disabled.
   - testFork_TokenVariants: Withdraw USDT/DAI (different decimals/revert behaviors).
   - testFork_Reentrancy: Simulate reentry attempts during execute/withdraw (expect ReentrancyGuard revert).
+
+- **Complex Hats Multicalls**:
+  - testFork_Multicall_CreateMultipleHats: Test complex hats multicall with multiple hats created.
+  - testFork_Multicall_CreateAndChangeHats: Test complex hats multicall with hats created and changed.
+  - testFork_Multicall_CreateRecipientHat: Test multicall that creates the recipient hat.
+  - testFork_Multicall_CreateDeepChildHats: Test multicall that creates multiple levels of child hats.
 
 - **Multi-Proposal**:
   - testFork_MultipleProposals_SameRecipient: Accumulate allowances, withdraw partially.

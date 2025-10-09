@@ -6,6 +6,7 @@ import {
   IProposalHatterEvents, IProposalHatterErrors, IProposalHatterTypes
 } from "../../src/interfaces/IProposalHatter.sol";
 import { IHats } from "../../lib/hats-protocol/src/Interfaces/IHats.sol";
+import { HatsErrors } from "../../lib/hats-protocol/src/Interfaces/HatsErrors.sol";
 import { stdError } from "forge-std/StdError.sol";
 
 /// @title Execute Tests for ProposalHatter
@@ -279,11 +280,12 @@ contract Execute_Tests is ForkTestBase {
     );
   }
 
-  function test_RevertIf_MulticallFails() public {
+  function test_RevertIf_MulticallFails_MulticallRevertsBubbled() public {
+    // Build a valid multicall that Hats Protocol will reject
     uint256 targetHatId = approverBranchId;
     bytes[] memory calls = new bytes[](1);
     calls[0] = abi.encodeWithSelector(IHats.setHatStatus.selector, targetHatId, false);
-    bytes memory failingMulticall = abi.encode(calls);
+    bytes memory failingMulticall = _buildValidMulticall(calls);
 
     // craft proposal whose multicall will revert (unauthorized toggle call)
     (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expectedProposal) =
@@ -295,10 +297,16 @@ contract Execute_Tests is ForkTestBase {
     expectedProposal.eta = uint64(block.timestamp);
     _assertProposalData(_getProposalData(proposalId), expectedProposal);
 
-    // expect entire execute to revert when hats multicall fails
+    // warp past ETA
     _warpPastETA(proposalId);
 
-    vm.expectRevert();
+    // expect entire execute to revert when hats multicall fails. The expected error from Hats Protocol in this case is
+    // `IHats.NotHatsToggle()`
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        IProposalHatterErrors.HatsMulticallFailed.selector, abi.encodeWithSelector(HatsErrors.NotHatsToggle.selector)
+      )
+    );
     _executeProposal(proposalId);
 
     // proposal remains Approved with original data

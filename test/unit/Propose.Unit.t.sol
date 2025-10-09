@@ -6,6 +6,7 @@ import {
   IProposalHatterEvents, IProposalHatterErrors, IProposalHatterTypes
 } from "../../src/interfaces/IProposalHatter.sol";
 import { Strings } from "../../lib/openzeppelin-contracts/contracts/utils/Strings.sol";
+import { IMulticallable } from "../../src/interfaces/IMulticallable.sol";
 
 /// @title Propose Tests for ProposalHatter
 /// @notice Tests for proposal creation and reserved hat functionality
@@ -15,8 +16,8 @@ contract Propose_Tests is ForkTestBase {
   // --------------------
 
   function test_ProposeValid() public {
-    // Arbitrary hats multicall bytes (don't need to be valid for proposal tests)
-    bytes memory hatsMulticall = hex"1234567890abcdef";
+    // Build a valid hats multicall payload that creates a hat during execution
+    bytes memory hatsMulticall = _buildSingleHatCreationMulticall(approverBranchId, "Lifecycle Hat");
 
     // Build expected proposal data
     IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
@@ -212,7 +213,10 @@ contract Propose_Tests is ForkTestBase {
     _assertProposalData(_getProposalData(proposalId), expected);
   }
 
-  function testFuzz_ProposeRolesOnly(bytes calldata hatsMulticall) public {
+  function test_ProposeRolesOnly_ValidMulticall() public {
+    // Build a valid hats multicall payload that creates a hat during execution
+    bytes memory hatsMulticall = _buildSingleHatCreationMulticall(approverBranchId, "Lifecycle Hat");
+
     // Build expected proposal data with roles only (0 funding, arbitrary token)
     IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
       proposer, 0, ETH, 1 days, recipientHat, 0, hatsMulticall, IProposalHatterTypes.ProposalState.Active
@@ -248,6 +252,75 @@ contract Propose_Tests is ForkTestBase {
 
     // Verify proposal data stored correctly with fuzzed hatsMulticall
     _assertProposalData(_getProposalData(proposalId), expected);
+  }
+
+  function test_ProposeRolesOnly_RevertIf_MulticallTooShort() public {
+    // Build an invalid hats multicall payload that is too short (<4 bytes)
+    bytes memory hatsMulticall = hex"12345678";
+
+    // Build expected proposal data with roles only (0 funding, arbitrary token)
+    IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
+      proposer, 0, ETH, 1 days, recipientHat, 0, hatsMulticall, IProposalHatterTypes.ProposalState.Active
+    );
+
+    // Attempt to propose with invalid hatsMulticall
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    vm.prank(proposer);
+    proposalHatter.propose(
+      expected.fundingAmount,
+      expected.fundingToken,
+      expected.timelockSec,
+      expected.recipientHatId,
+      expected.reservedHatId,
+      expected.hatsMulticall,
+      bytes32(uint256(1))
+    );
+  }
+
+  function testFuzz_ProposeRolesOnly_RevertIf_MulticallWrongSelector(bytes4 selector) public {
+    // Build an invalid hats multicall that doesn't match the multicall selector
+    bytes memory hatsMulticall = abi.encodeWithSelector(selector, new bytes[](1));
+
+    // Build expected proposal data with roles only (0 funding, arbitrary token)
+    IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
+      proposer, 0, ETH, 1 days, recipientHat, 0, hatsMulticall, IProposalHatterTypes.ProposalState.Active
+    );
+
+    // Attempt to propose with invalid hatsMulticall
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    vm.prank(proposer);
+    proposalHatter.propose(
+      expected.fundingAmount,
+      expected.fundingToken,
+      expected.timelockSec,
+      expected.recipientHatId,
+      expected.reservedHatId,
+      expected.hatsMulticall,
+      bytes32(uint256(1))
+    );
+  }
+
+  function testFuzz_ProposeRolesOnly_RevertIf_MulticallInvalidPayload(bytes32 args) public {
+    // Build an invalid hats multicall payload
+    bytes memory hatsMulticall = abi.encodeWithSelector(IMulticallable.multicall.selector, args);
+
+    // Build expected proposal data with roles only (0 funding, arbitrary token)
+    IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
+      proposer, 0, ETH, 1 days, recipientHat, 0, hatsMulticall, IProposalHatterTypes.ProposalState.Active
+    );
+
+    // Attempt to propose with invalid hatsMulticall
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    vm.prank(proposer);
+    proposalHatter.propose(
+      expected.fundingAmount,
+      expected.fundingToken,
+      expected.timelockSec,
+      expected.recipientHatId,
+      expected.reservedHatId,
+      expected.hatsMulticall,
+      bytes32(uint256(1))
+    );
   }
 
   function test_RevertIf_DuplicateProposal() public {

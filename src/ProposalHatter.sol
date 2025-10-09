@@ -64,6 +64,8 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   // Storage
   // --------------------
 
+  string public constant VERSION = "test1";
+
   /// @inheritdoc IProposalHatter
   address public immutable HATS_PROTOCOL_ADDRESS;
   /// @inheritdoc IProposalHatter
@@ -164,12 +166,15 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Only callable by the Proposer
     _checkAuth(proposerHat);
 
+    // Ensure the hatsMulticall is valid, and get the multicall hash if so
+    bytes32 hatsMulticallHash = _checkMulticall(hatsMulticall);
+
     // Get the Safe address
     address safe_ = safe;
 
     // Compute the proposal ID
     proposalId = _computeProposalId(
-      msg.sender, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticall, salt
+      msg.sender, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticallHash, salt
     );
 
     // New proposals must be unique
@@ -200,8 +205,21 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       hatsMulticall: hatsMulticall
     });
 
-    // Log the proposal. We use inlime assembly instead of the standard emit to avoid re-introducing stack pressure
-    bytes32 hatsMulticallHash = EfficientHashLib.hash(hatsMulticall);
+    // Equivalent to:
+    // emit IProposalHatterEvents.Proposed(
+    //   proposalId,
+    //   EfficientHashLib.hash(hatsMulticall),
+    //   msg.sender,
+    //   fundingAmount_,
+    //   fundingToken_,
+    //   timelockSec_,
+    //   safe_,
+    //   recipientHatId_,
+    //   approverHatId_,
+    //   reservedHatId_,
+    //   salt
+    // );
+
     assembly {
       let dataPtr := mload(0x40)
       mstore(dataPtr, fundingAmount_)
@@ -222,21 +240,6 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
         and(caller(), 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
       )
     }
-
-    // Equivalent to:
-    // emit IProposalHatterEvents.Proposed(
-    //   proposalId,
-    //   EfficientHashLib.hash(hatsMulticall),
-    //   msg.sender,
-    //   fundingAmount_,
-    //   fundingToken_,
-    //   timelockSec_,
-    //   safe_,
-    //   recipientHatId_,
-    //   approverHatId_,
-    //   reservedHatId_,
-    //   salt
-    // );
   }
 
   /// @inheritdoc IProposalHatter
@@ -529,14 +532,23 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     bytes calldata hatsMulticall,
     bytes32 salt
   ) external view returns (bytes32) {
+    // Get the hash of the hats multicall if valid, or revert if invalid
+    bytes32 hatsMulticallHash = _checkMulticall(hatsMulticall);
+
+    // Compute the proposal ID using the multicall hash
     return _computeProposalId(
-      submitter_, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticall, salt
+      submitter_, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticallHash, salt
     );
   }
 
   /// @inheritdoc IProposalHatter
   function getProposalState(bytes32 proposalId) external view returns (IProposalHatterTypes.ProposalState) {
     return proposals[proposalId].state;
+  }
+
+  /// @inheritdoc IProposalHatter
+  function decodeMulticallPayload(bytes calldata rawBytes) external pure returns (bytes[] memory) {
+    return abi.decode(rawBytes, (bytes[]));
   }
 
   // --------------------
@@ -565,12 +577,12 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
   /// @dev Internal helper to compute the deterministic proposalId for the current caller.
   /// @param submitter_ The address that proposed.
-  /// @param hatsMulticall ABI-encoded bytes[] for IMulticallable.multicall.
   /// @param fundingAmount_ Funding amount to approve on execute.
   /// @param fundingToken_ Token address (address(0) for ETH).
   /// @param timelockSec_ Per-proposal delay in seconds.
   /// @param safe_ The Safe for which this allowance is valid.
   /// @param recipientHatId_ Recipient hat ID.
+  /// @param hatsMulticallHash The hash of the hats multicall.
   /// @param salt Optional salt for de-duplication.
   function _computeProposalId(
     address submitter_,
@@ -579,12 +591,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     uint32 timelockSec_,
     address safe_,
     uint256 recipientHatId_,
-    bytes calldata hatsMulticall,
+    bytes32 hatsMulticallHash,
     bytes32 salt
   ) internal view returns (bytes32) {
-    // Pre-hash the dynamic bytes
-    bytes32 multicallHash = EfficientHashLib.hash(hatsMulticall);
-
     // Hash the static tuple with Solady
     return EfficientHashLib.hash(
       bytes32(block.chainid),
@@ -596,7 +605,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       bytes32(uint256(timelockSec_)),
       bytes32(uint256(uint160(safe_))),
       bytes32(recipientHatId_),
-      multicallHash,
+      hatsMulticallHash,
       salt
     );
   }
@@ -643,10 +652,11 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       // Delete the hats multicall from storage for some gas savings
       delete p.hatsMulticall;
 
-      // Decode stored bytes into bytes[] expected by Multicallable
-      bytes[] memory calls = abi.decode(hatsMulticall, (bytes[]));
-      // Execute the multicall. If Hats reverts, the entire tx reverts (atomicity)
-      IMulticallable(HATS_PROTOCOL_ADDRESS).multicall(calls);
+      // Execute the multicall as a low level call.
+      // In {propose}, we required that hatsMulticall encodes an IMulticallable.multicall(bytes[]) call.
+      // If Hats reverts, the entire tx reverts (atomicity)
+      (bool success, bytes memory ret) = HATS_PROTOCOL_ADDRESS.call(hatsMulticall);
+      if (!success) revert IProposalHatterErrors.HatsMulticallFailed(ret);
     }
 
     // Log the execution with the new allowance
@@ -700,6 +710,32 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     if (token != address(0) && ret.length > 0) {
       if (ret.length != 32) revert IProposalHatterErrors.ERC20TransferMalformedReturn(token, ret);
       if (abi.decode(ret, (bool)) != true) revert IProposalHatterErrors.ERC20TransferReturnedFalse(token, ret);
+    }
+  }
+
+  /// @dev Internal helper to check if the hatsMulticall is valid, get the multicall hash if so, or revert if invalid
+  /// Valid multicalls are either:
+  /// - empty, or
+  /// - begin with the IMulticallable.multicall(bytes[]) function selector *and* ABI-decode to a bytes[] array
+  /// @param hatsMulticall The hats multicall to check
+  /// @return multicallHash The multicall hash if the hatsMulticall is valid, otherwise bytes32(0)
+  function _checkMulticall(bytes calldata hatsMulticall) internal view returns (bytes32) {
+    // Empty multicall is valid
+    if (hatsMulticall.length == 0) return bytes32(0);
+
+    // Must be at least 4 bytes for selector
+    if (hatsMulticall.length < 4) revert IProposalHatterErrors.InvalidMulticall();
+
+    // Check selector matches multicall(bytes[])
+    if (bytes4(hatsMulticall[:4]) != IMulticallable.multicall.selector) {
+      revert IProposalHatterErrors.InvalidMulticall();
+    }
+
+    // Validate the payload is decodable as bytes[]
+    try this.decodeMulticallPayload(hatsMulticall[4:]) returns (bytes[] memory) {
+      return EfficientHashLib.hash(hatsMulticall);
+    } catch {
+      revert IProposalHatterErrors.InvalidMulticall();
     }
   }
 }
