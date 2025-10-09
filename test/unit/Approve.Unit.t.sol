@@ -45,6 +45,9 @@ contract Approve_Tests is ForkTestBase {
 
     // Verify proposal data is correct after approval
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_RevertIf_NotApprover() public {
@@ -79,6 +82,9 @@ contract Approve_Tests is ForkTestBase {
 
     // Verify ETA is correctly set based on fuzzed timelock
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_RevertIf_Approve_None() public {

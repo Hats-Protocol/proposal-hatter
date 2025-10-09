@@ -37,6 +37,9 @@ contract Escalate_Tests is ForkTestBase {
 
     // Verify proposal data is correct after escalation
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_EscalateApproved() public {
@@ -71,6 +74,9 @@ contract Escalate_Tests is ForkTestBase {
 
     // Verify proposal data is correct after escalation
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_RevertIf_NotEscalator() public {
@@ -162,5 +168,8 @@ contract Escalate_Tests is ForkTestBase {
     // Verify escalation succeeded
     expected.state = IProposalHatterTypes.ProposalState.Escalated;
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 }

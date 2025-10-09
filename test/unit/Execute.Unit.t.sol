@@ -592,13 +592,10 @@ contract ApproveAndExecute_Tests is ForkTestBase {
     // Create a fake proposal ID that doesn't exist
     bytes32 nonExistentProposalId = bytes32(uint256(999_999));
 
-    // Mint executor and approver hats to approver for authorization
-    vm.prank(org);
-    hats.mintHat(executorHat, approver);
-
-    // Attempt to approveAndExecute a non-existent proposal should revert with NotAuthorized, since there is approver
-    // hat to be worn by an approver.
-    vm.expectRevert(abi.encodeWithSelector(IProposalHatterErrors.NotAuthorized.selector));
+    // Attempt to approveAndExecute a non-existent proposal
+    vm.expectRevert(
+      abi.encodeWithSelector(IProposalHatterErrors.InvalidState.selector, IProposalHatterTypes.ProposalState.None)
+    );
     vm.prank(approver);
     proposalHatter.approveAndExecute(nonExistentProposalId);
   }
@@ -640,18 +637,11 @@ contract ApproveAndExecute_Tests is ForkTestBase {
 
   function test_RevertIf_ApproveAndExecute_Canceled() public {
     // Create a proposal
-    (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expectedProposal) =
-      _createTestProposal(1 ether, ETH, 0, recipientHat, 0, "", bytes32("canceled"));
+    (bytes32 proposalId,) = _createTestProposal(1 ether, ETH, 0, recipientHat, 0, "", bytes32("canceled"));
 
-    // Cancel the proposal
+    // Cancel the proposal (toggling off the approver hat)
     vm.prank(proposer);
     proposalHatter.cancel(proposalId);
-
-    // Mint executor hat and approver hat to approver
-    vm.prank(org);
-    hats.mintHat(executorHat, approver);
-    vm.prank(approverAdmin);
-    hats.mintHat(expectedProposal.approverHatId, approver);
 
     // Attempt to approveAndExecute a canceled proposal should revert
     vm.expectRevert(

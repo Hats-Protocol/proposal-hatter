@@ -47,6 +47,9 @@ contract Reject_Tests is ForkTestBase {
 
     // Verify reserved hat was toggled off and its toggle module is ProposalHatter
     _assertHatToggle(expectedReservedHatId, address(proposalHatter), false);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_RevertIf_Reject_NotApprover() public {
@@ -64,9 +67,9 @@ contract Reject_Tests is ForkTestBase {
     bytes32 nonExistentProposalId = bytes32(uint256(999_999));
 
     // Attempt to reject a non-existent proposal
-    // Note: Will revert with NotAuthorized because auth check happens before state check
-    // and the approverHatId for a non-existent proposal is 0
-    vm.expectRevert(IProposalHatterErrors.NotAuthorized.selector);
+    vm.expectRevert(
+      abi.encodeWithSelector(IProposalHatterErrors.InvalidState.selector, IProposalHatterTypes.ProposalState.None)
+    );
     vm.prank(approver);
     proposalHatter.reject(nonExistentProposalId);
   }
@@ -87,12 +90,7 @@ contract Reject_Tests is ForkTestBase {
 
   function test_RevertIf_Reject_Escalated() public {
     // Create a proposal
-    (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expected) =
-      _createTestProposal(1 days, bytes32(uint256(110)));
-
-    // Mint approver hat to approver (needed for auth check)
-    vm.prank(approverAdmin);
-    hats.mintHat(expected.approverHatId, approver);
+    (bytes32 proposalId,) = _createTestProposal(1 days, bytes32(uint256(110)));
 
     // Escalate the proposal (escalator hat already minted in setup)
     vm.prank(escalator);
@@ -108,12 +106,7 @@ contract Reject_Tests is ForkTestBase {
 
   function test_RevertIf_Reject_Canceled() public {
     // Create a proposal
-    (bytes32 proposalId, IProposalHatterTypes.ProposalData memory expected) =
-      _createTestProposal(1 days, bytes32(uint256(111)));
-
-    // Mint approver hat to approver (needed for auth check)
-    vm.prank(approverAdmin);
-    hats.mintHat(expected.approverHatId, approver);
+    (bytes32 proposalId,) = _createTestProposal(1 days, bytes32(uint256(111)));
 
     // Cancel the proposal (as the proposer who is the submitter)
     vm.prank(proposer);
@@ -173,6 +166,9 @@ contract Reject_Tests is ForkTestBase {
 
     // No reserved hat to toggle off, so just verify state is correct
     assertEq(actual.reservedHatId, 0, "Should have no reserved hat");
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(actual.approverHatId, address(proposalHatter), false);
   }
 
   function test_RejectDoesNotCheckPause() public {
@@ -195,5 +191,8 @@ contract Reject_Tests is ForkTestBase {
     // Verify rejection succeeded
     expected.state = IProposalHatterTypes.ProposalState.Rejected;
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 }

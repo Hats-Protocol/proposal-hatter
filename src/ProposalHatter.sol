@@ -250,6 +250,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
     // Only active proposals can be approved
     if (p.state != IProposalHatterTypes.ProposalState.Active) revert IProposalHatterErrors.InvalidState(p.state);
+
     // Must wear per-proposal approver hat
     if (!IHats(HATS_PROTOCOL_ADDRESS).isWearerOfHat(msg.sender, p.approverHatId)) {
       revert IProposalHatterErrors.NotAuthorized();
@@ -262,6 +263,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Advance the proposal state to Approved
     p.state = IProposalHatterTypes.ProposalState.Approved;
 
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
+
     // Log the approval
     emit IProposalHatterEvents.Approved(proposalId, msg.sender, eta);
   }
@@ -270,9 +274,6 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   function execute(bytes32 proposalId) external nonReentrant {
     // Only callable when proposals are not paused
     _checkProposalsPaused();
-
-    // Only callable by the Executor (unless execution is public, ie is set to PUBLIC_SENTINEL)
-    _checkAuth(executorHat);
 
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
@@ -283,6 +284,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     if (p.state != IProposalHatterTypes.ProposalState.Approved) revert IProposalHatterErrors.InvalidState(p.state);
     if (uint64(block.timestamp) < p.eta) revert IProposalHatterErrors.TooEarly(p.eta, uint64(block.timestamp));
 
+    // Only callable by the Executor (unless execution is public, ie is set to PUBLIC_SENTINEL)
+    _checkAuth(executorHat);
+
     // Execute the proposal
     _execute(p, proposalId);
   }
@@ -292,16 +296,8 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Only callable when proposals are not paused
     _checkProposalsPaused();
 
-    // Only callable by Executor (unless execution is public) and Approver Ticket Hat wearer
-    _checkAuth(executorHat);
-
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
-
-    // Only callable by Approver Ticket Hat wearer
-    if (!IHats(HATS_PROTOCOL_ADDRESS).isWearerOfHat(msg.sender, p.approverHatId)) {
-      revert IProposalHatterErrors.NotAuthorized();
-    }
 
     // Proposals can only be approved and executed atomically...
     // - if they are Active
@@ -311,6 +307,15 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     uint64 nowTs = uint64(block.timestamp);
     uint32 timelockSec = p.timelockSec;
     if (timelockSec != 0) revert IProposalHatterErrors.TooEarly(nowTs + timelockSec, nowTs);
+
+    // Only callable by Approver-Executor (unless execution is public, ie is set to PUBLIC_SENTINEL)
+    _checkAuth(executorHat);
+    if (!IHats(HATS_PROTOCOL_ADDRESS).isWearerOfHat(msg.sender, p.approverHatId)) {
+      revert IProposalHatterErrors.NotAuthorized();
+    }
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the approval
     uint64 eta = nowTs;
@@ -324,9 +329,6 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
   /// @inheritdoc IProposalHatter
   function escalate(bytes32 proposalId) external {
-    // Only callable by the Escalator
-    _checkAuth(escalatorHat);
-
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
 
@@ -336,8 +338,14 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       revert IProposalHatterErrors.InvalidState(p.state);
     }
 
+    // Only callable by the Escalator
+    _checkAuth(escalatorHat);
+
     // Set the proposal state to Escalated
     p.state = IProposalHatterTypes.ProposalState.Escalated;
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the escalation
     emit IProposalHatterEvents.Escalated(proposalId, msg.sender);
@@ -348,17 +356,20 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
 
-    // Only callable by Approver Ticket Hat wearer
-    _checkAuth(p.approverHatId);
-
     // Proposals can only be rejected when Active
     if (p.state != IProposalHatterTypes.ProposalState.Active) revert IProposalHatterErrors.InvalidState(p.state);
+
+    // Only callable by Approver Ticket Hat wearer
+    _checkAuth(p.approverHatId);
 
     // Set the proposal state to Rejected
     p.state = IProposalHatterTypes.ProposalState.Rejected;
 
     // If it exists, toggle off the reserved hat to clean up
     if (p.reservedHatId != 0) _toggleOffHat(p.reservedHatId);
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the rejection
     emit IProposalHatterEvents.Rejected(proposalId, msg.sender);
@@ -369,20 +380,23 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
 
-    // Only callable by the original submitter
-    if (msg.sender != p.submitter) revert IProposalHatterErrors.NotAuthorized();
-
     // Proposals can only be canceled when Active or Approved
     if (p.state != IProposalHatterTypes.ProposalState.Active && p.state != IProposalHatterTypes.ProposalState.Approved)
     {
       revert IProposalHatterErrors.InvalidState(p.state);
     }
 
+    // Only callable by the original submitter
+    if (msg.sender != p.submitter) revert IProposalHatterErrors.NotAuthorized();
+
     // Set the proposal state to Canceled
     p.state = IProposalHatterTypes.ProposalState.Canceled;
 
     // If it exists, toggle off the reserved hat to clean up
     if (p.reservedHatId != 0) _toggleOffHat(p.reservedHatId);
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the cancellation
     emit IProposalHatterEvents.Canceled(proposalId, msg.sender);

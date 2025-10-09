@@ -43,6 +43,9 @@ contract Cancel_Tests is ForkTestBase {
 
     // Verify reserved hat was toggled off and its toggle module is ProposalHatter
     _assertHatToggle(expectedReservedHatId, address(proposalHatter), false);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_CancelApproved() public {
@@ -83,6 +86,9 @@ contract Cancel_Tests is ForkTestBase {
 
     // Verify reserved hat was toggled off and its toggle module is ProposalHatter
     _assertHatToggle(expectedReservedHatId, address(proposalHatter), false);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_RevertIf_Cancel_NotSubmitter() public {
@@ -117,6 +123,9 @@ contract Cancel_Tests is ForkTestBase {
 
     // No reserved hat to toggle off, so just verify state is correct
     assertEq(actual.reservedHatId, 0, "Should have no reserved hat");
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 
   function test_RevertIf_Cancel_None() public {
@@ -124,9 +133,9 @@ contract Cancel_Tests is ForkTestBase {
     bytes32 nonExistentProposalId = bytes32(uint256(999_999));
 
     // Attempt to cancel a non-existent proposal
-    // Note: Will revert with NotAuthorized because submitter check happens before state check
-    // and the submitter for a non-existent proposal is address(0)
-    vm.expectRevert(IProposalHatterErrors.NotAuthorized.selector);
+    vm.expectRevert(
+      abi.encodeWithSelector(IProposalHatterErrors.InvalidState.selector, IProposalHatterTypes.ProposalState.None)
+    );
     vm.prank(proposer);
     proposalHatter.cancel(nonExistentProposalId);
   }
@@ -211,5 +220,8 @@ contract Cancel_Tests is ForkTestBase {
     // Verify cancellation succeeded
     expected.state = IProposalHatterTypes.ProposalState.Canceled;
     _assertProposalData(_getProposalData(proposalId), expected);
+
+    // Verify approver hat was toggled off
+    _assertHatToggle(expected.approverHatId, address(proposalHatter), false);
   }
 }
