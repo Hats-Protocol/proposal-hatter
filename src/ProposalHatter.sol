@@ -200,23 +200,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       hatsMulticall: hatsMulticall
     });
 
-    // // Log the proposal
-    // emit IProposalHatterEvents.Proposed(
-    //   proposalId,
-    //   EfficientHashLib.hash(hatsMulticall),
-    //   msg.sender,
-    //   fundingAmount_,
-    //   fundingToken_,
-    //   timelockSec_,
-    //   safe_,
-    //   recipientHatId_,
-    //   approverHatId_,
-    //   reservedHatId_,
-    //   salt
-    // );
-
-    // Log the proposal without re-introducing stack pressure
-    // TODO remove this once we decide how to handle stack too deep errors with the above vanilla emit
+    // Log the proposal. We use inlime assembly instead of the standard emit to avoid re-introducing stack pressure
     bytes32 hatsMulticallHash = EfficientHashLib.hash(hatsMulticall);
     assembly {
       let dataPtr := mload(0x40)
@@ -238,6 +222,21 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
         and(caller(), 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
       )
     }
+
+    // Equivalent to:
+    // emit IProposalHatterEvents.Proposed(
+    //   proposalId,
+    //   EfficientHashLib.hash(hatsMulticall),
+    //   msg.sender,
+    //   fundingAmount_,
+    //   fundingToken_,
+    //   timelockSec_,
+    //   safe_,
+    //   recipientHatId_,
+    //   approverHatId_,
+    //   reservedHatId_,
+    //   salt
+    // );
   }
 
   /// @inheritdoc IProposalHatter
@@ -616,12 +615,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     if (IHats(HATS_PROTOCOL_ADDRESS).getNextId(admin) != reservedHatId_) revert InvalidReservedHatId();
 
     // Create the reserved hat
-    uint256 returnedHatId = IHats(HATS_PROTOCOL_ADDRESS).createHat(
+    IHats(HATS_PROTOCOL_ADDRESS).createHat(
       admin, Strings.toHexString(uint256(proposalId), 32), 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, ""
     );
-
-    // Sanity check: ensure the returned hat id matches the input
-    if (reservedHatId_ != returnedHatId) revert InvalidReservedHatId();
   }
 
   /// @dev Internal helper to execute a proposal. Updates the allowance ledger and executes the Hats Protocol multicall.
