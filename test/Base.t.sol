@@ -4,8 +4,8 @@ pragma solidity ^0.8.30;
 import { Test } from "forge-std/Test.sol";
 import { Deploy } from "../script/Deploy.s.sol";
 import { ProposalHatter } from "../src/ProposalHatter.sol";
+import { IProposalHatterTypes } from "../src/interfaces/IProposalHatter.sol";
 import { IHats } from "../lib/hats-protocol/src/Interfaces/IHats.sol";
-import { IProposalHatter, IProposalHatterTypes } from "../src/interfaces/IProposalHatter.sol";
 import { IERC20 } from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import { TestHelpers } from "./helpers/TestHelpers.sol";
 

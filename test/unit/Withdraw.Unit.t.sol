@@ -3,10 +3,7 @@ pragma solidity ^0.8.30;
 
 import { ForkTestBase } from "../Base.t.sol";
 import {
-  IProposalHatter,
-  IProposalHatterEvents,
-  IProposalHatterErrors,
-  IProposalHatterTypes
+  IProposalHatterEvents, IProposalHatterErrors, IProposalHatterTypes
 } from "../../src/interfaces/IProposalHatter.sol";
 import { NoReturnToken, FalseReturningToken, MalformedReturnToken } from "../helpers/MaliciousTokens.sol";
 
@@ -104,7 +101,7 @@ contract Withdraw_Tests is ForkTestBase {
     proposalHatter.withdraw(recipientHat, expectedProposal.safe, expectedProposal.fundingToken, 1 ether);
   }
 
-  function test_RevertIf_SafeFailure() public {
+  function test_RevertIf_SafeModuleNotEnabled() public {
     // Create a proposal with the disabled Safe (module not enabled)
     vm.prank(org);
     proposalHatter.setSafe(disabledSafe);
@@ -117,6 +114,48 @@ contract Withdraw_Tests is ForkTestBase {
     vm.expectRevert("GS104");
     vm.prank(recipient);
     proposalHatter.withdraw(recipientHat, expectedProposal.safe, expectedProposal.fundingToken, 1 ether);
+  }
+
+  function test_RevertIf_InsufficientSafeBalance_ETH() public {
+    // Point ProposalHatter at the underfunded Safe and execute a proposal lifecycle for it
+    vm.prank(org);
+    proposalHatter.setSafe(underfundedSafe);
+
+    (, IProposalHatterTypes.ProposalData memory expectedProposal) = _executeFullProposalLifecycle();
+
+    // Sanity: ensure the allowance exceeds the Safe balance so the Safe call will fail
+    uint256 safeBalance = _getBalance(expectedProposal.fundingToken, expectedProposal.safe);
+    assertLt(
+      safeBalance, uint256(expectedProposal.fundingAmount), "underfundedSafe unexpectedly has sufficient balance"
+    );
+
+    // The Safe module call should return (false, returnData) and trigger SafeExecutionFailed with empty return data
+    vm.expectRevert(abi.encodeWithSelector(IProposalHatterErrors.SafeExecutionFailed.selector, bytes("")));
+
+    vm.prank(recipient);
+    proposalHatter.withdraw(
+      recipientHat, expectedProposal.safe, expectedProposal.fundingToken, expectedProposal.fundingAmount
+    );
+  }
+
+  function test_RevertIf_InsufficientSafeBalance_ERC20() public {
+    vm.prank(org);
+    proposalHatter.setSafe(underfundedSafe);
+
+    uint88 fundingAmount = 1000 ether;
+    (, IProposalHatterTypes.ProposalData memory expectedProposal) =
+      _executeFullProposalLifecycle(DAI, fundingAmount, recipientHat);
+
+    // Ensure the Safe balance is lower than the amount that will be withdrawn
+    uint256 safeBalance = _getBalance(DAI, expectedProposal.safe);
+    assertLt(safeBalance, uint256(expectedProposal.fundingAmount), "token balance unexpectedly sufficient");
+
+    // When the Safe forwards the transfer call, DAI reverts with the standard MakerDAO message
+    bytes memory expectedReturnData = abi.encodeWithSignature("Error(string)", "Dai/insufficient-balance");
+    vm.expectRevert(abi.encodeWithSelector(IProposalHatterErrors.SafeExecutionFailed.selector, expectedReturnData));
+
+    vm.prank(recipient);
+    proposalHatter.withdraw(recipientHat, expectedProposal.safe, DAI, expectedProposal.fundingAmount);
   }
 
   function testFuzz_WithdrawAmount(uint88 amount) public {

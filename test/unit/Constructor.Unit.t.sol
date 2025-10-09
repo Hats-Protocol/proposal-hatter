@@ -3,12 +3,7 @@ pragma solidity ^0.8.30;
 
 import { ForkTestBase } from "../Base.t.sol";
 import { ProposalHatter } from "../../src/ProposalHatter.sol";
-import {
-  IProposalHatter,
-  IProposalHatterEvents,
-  IProposalHatterErrors,
-  IProposalHatterTypes
-} from "../../src/interfaces/IProposalHatter.sol";
+import { IProposalHatterEvents, IProposalHatterErrors } from "../../src/interfaces/IProposalHatter.sol";
 
 /// @title Constructor Tests for ProposalHatter
 /// @notice Tests for deployment and constructor validation

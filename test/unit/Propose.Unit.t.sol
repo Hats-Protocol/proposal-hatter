@@ -2,12 +2,8 @@
 pragma solidity ^0.8.30;
 
 import { ForkTestBase } from "../Base.t.sol";
-import { ProposalHatter } from "../../src/ProposalHatter.sol";
 import {
-  IProposalHatter,
-  IProposalHatterEvents,
-  IProposalHatterErrors,
-  IProposalHatterTypes
+  IProposalHatterEvents, IProposalHatterErrors, IProposalHatterTypes
 } from "../../src/interfaces/IProposalHatter.sol";
 import { Strings } from "../../lib/openzeppelin-contracts/contracts/utils/Strings.sol";
 

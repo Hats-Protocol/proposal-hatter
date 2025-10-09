@@ -3,13 +3,9 @@ pragma solidity ^0.8.30;
 
 import { ForkTestBase } from "../Base.t.sol";
 import {
-  IProposalHatter,
-  IProposalHatterEvents,
-  IProposalHatterErrors,
-  IProposalHatterTypes
+  IProposalHatterEvents, IProposalHatterErrors, IProposalHatterTypes
 } from "../../src/interfaces/IProposalHatter.sol";
 import { IHats } from "../../lib/hats-protocol/src/Interfaces/IHats.sol";
-import { HatsErrors } from "../../lib/hats-protocol/src/Interfaces/HatsErrors.sol";
 import { stdError } from "forge-std/StdError.sol";
 
 /// @title Execute Tests for ProposalHatter
