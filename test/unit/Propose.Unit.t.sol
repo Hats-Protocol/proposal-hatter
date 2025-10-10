@@ -459,8 +459,9 @@ contract Propose_Tests is ForkTestBase {
 
   function test_RevertIf_InvalidReservedHatId_TopHat() public {
     // Build proposal data with top hat as reserved hat ID (invalid - top hats cannot have admins)
-    IProposalHatterTypes.ProposalData memory expected =
-      _buildExpectedProposal(proposer, 1 ether, ETH, 1 days, recipientHat, topHatId, "", IProposalHatterTypes.ProposalState.Active);
+    IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
+      proposer, 1 ether, ETH, 1 days, recipientHat, topHatId, "", IProposalHatterTypes.ProposalState.Active
+    );
 
     bytes32 salt = bytes32(uint256(999));
 
