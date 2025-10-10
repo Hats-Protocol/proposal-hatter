@@ -215,6 +215,14 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
   /// @return decoded The decoded bytes.
   function decodeMulticallPayload(bytes calldata rawBytes) external pure returns (bytes[] memory);
 
+  /// @notice Remove the first createHat call from a Hats multicall payload.
+  /// @dev Useful when using reservedHatId - the first hat creation is handled by ProposalHatter,
+  ///      so it must be removed from the multicall exported from the Hats Protocol frontend.
+  ///      Reverts with InvalidMulticall if the payload is malformed or the first call is not createHat.
+  /// @param hatsMulticall Full calldata for `IMulticallable.multicall` including the function selector.
+  /// @return modified The modified multicall with the first createHat call removed (including selector).
+  function removeReservedHatFromMulticall(bytes calldata hatsMulticall) external pure returns (bytes memory);
+
   // ---- Storage getters ----
   /// @notice Proposal data by id.
   /// @param proposalId The proposal id.

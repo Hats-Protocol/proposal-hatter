@@ -64,7 +64,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   // Storage
   // --------------------
 
-  string public constant VERSION = "test1";
+  string public constant VERSION = "test2";
 
   /// @inheritdoc IProposalHatter
   address public immutable HATS_PROTOCOL_ADDRESS;
@@ -551,6 +551,39 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     return abi.decode(rawBytes, (bytes[]));
   }
 
+  /// @inheritdoc IProposalHatter
+  function removeReservedHatFromMulticall(bytes calldata hatsMulticall) external pure returns (bytes memory) {
+    // Check minimum length for multicall(bytes[]) call (4 bytes selector + 32 bytes offset)
+    if (hatsMulticall.length < 36) revert InvalidMulticall();
+
+    // Verify the function selector is multicall
+    if (!_hasSelectorCalldata(hatsMulticall, IMulticallable.multicall.selector)) revert InvalidMulticall();
+
+    // Decode the parameters (skip the 4-byte selector)
+    bytes[] memory calls = abi.decode(hatsMulticall[4:], (bytes[]));
+
+    // Require at least one call
+    if (calls.length == 0) revert InvalidMulticall();
+
+    // Check that the first call is createHat
+    bytes memory firstCall = calls[0];
+    if (firstCall.length < 4) revert InvalidMulticall();
+    bytes4 firstSelector;
+    assembly {
+      firstSelector := mload(add(firstCall, 0x20))
+    }
+    if (firstSelector != IHats.createHat.selector) revert InvalidMulticall();
+
+    // Create new array without the first element
+    bytes[] memory newCalls = new bytes[](calls.length - 1);
+    for (uint256 i = 1; i < calls.length; i++) {
+      newCalls[i - 1] = calls[i];
+    }
+
+    // Re-encode as full multicall calldata (selector + parameters)
+    return abi.encodeWithSelector(IMulticallable.multicall.selector, newCalls);
+  }
+
   // --------------------
   // Internal Helpers
   // --------------------
@@ -727,7 +760,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     if (hatsMulticall.length < 4) revert IProposalHatterErrors.InvalidMulticall();
 
     // Check selector matches multicall(bytes[])
-    if (bytes4(hatsMulticall[:4]) != IMulticallable.multicall.selector) {
+    if (!_hasSelectorCalldata(hatsMulticall, IMulticallable.multicall.selector)) {
       revert IProposalHatterErrors.InvalidMulticall();
     }
 
@@ -737,5 +770,22 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     } catch {
       revert IProposalHatterErrors.InvalidMulticall();
     }
+  }
+
+  /// @dev Check if data has the expected function selector.
+  /// @param data The data to check (assumes >= 4 bytes), passed as calldata.
+  /// @param selector The expected 4-byte function selector.
+  /// @return True if the first 4 bytes of data match the selector.
+  function _hasSelectorCalldata(bytes calldata data, bytes4 selector) internal pure returns (bool) {
+    bytes4 actualSelector;
+    assembly {
+      // data.offset gives us the byte position in calldata where this slice starts.
+      // For a top-level function parameter, this is typically 0x04 (after the function selector).
+      // For nested calldata slices, it points to wherever that slice begins in the original calldata.
+      // calldataload(offset) reads 32 bytes from calldata starting at the given offset.
+      // Since we only need the first 4 bytes for the selector, the remaining 28 bytes are ignored.
+      actualSelector := calldataload(data.offset)
+    }
+    return actualSelector == selector;
   }
 }

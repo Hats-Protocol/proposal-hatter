@@ -3,7 +3,8 @@ pragma solidity ^0.8.30;
 
 import { ForkTestBase } from "../Base.t.sol";
 import { ProposalHatter } from "../../src/ProposalHatter.sol";
-import { IProposalHatterTypes } from "../../src/interfaces/IProposalHatter.sol";
+import { IProposalHatterTypes, IProposalHatterErrors } from "../../src/interfaces/IProposalHatter.sol";
+import { IMulticallable } from "../../src/interfaces/IMulticallable.sol";
 
 /// @title View Tests for ProposalHatter
 /// @notice Tests for view functions and getters
@@ -388,5 +389,100 @@ contract View_Tests is ForkTestBase {
       uint8(IProposalHatterTypes.ProposalState.Rejected),
       "Rejected proposal should be Rejected"
     );
+  }
+
+  // --------------------
+  // removeReservedHatFromMulticall Tests
+  // --------------------
+
+  function test_removeReservedHatFromMulticall_TwoHats() public view {
+    // This is the example calldata from the user (full calldata including multicall selector)
+    bytes memory originalMulticall =
+      hex"ac9650d800000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000184b052925e000000a20002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000004a750000000000000000000000000000000000000000000000000000000000004a75000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000042697066733a2f2f6261666b726569616e79716d6c637734356b66677168647075617761766e6b6467377a6d687a78357a35327a337370346f68716e33696b6f627a340000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000184b052925e000000a20002000300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000004a750000000000000000000000000000000000000000000000000000000000004a75000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000001600000000000000000000000000000000000000000000000000000000000000042697066733a2f2f6261666b726569626c646d7a363433797863773366376b6f73696569796d323365637a61736770347175666a70706e6265356436716963766c6c75000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    // Remove the first createHat call
+    bytes memory modifiedMulticall = proposalHatter.removeReservedHatFromMulticall(originalMulticall);
+
+    // Helper to skip selector and decode
+    bytes memory originalParams = new bytes(originalMulticall.length - 4);
+    bytes memory modifiedParams = new bytes(modifiedMulticall.length - 4);
+    for (uint256 i = 4; i < originalMulticall.length; i++) {
+      originalParams[i - 4] = originalMulticall[i];
+    }
+    for (uint256 i = 4; i < modifiedMulticall.length; i++) {
+      modifiedParams[i - 4] = modifiedMulticall[i];
+    }
+
+    // Decode both to verify
+    bytes[] memory originalCalls = abi.decode(originalParams, (bytes[]));
+    bytes[] memory modifiedCalls = abi.decode(modifiedParams, (bytes[]));
+
+    // Original should have 2 calls
+    assertEq(originalCalls.length, 2, "Original should have 2 calls");
+
+    // Modified should have 1 call
+    assertEq(modifiedCalls.length, 1, "Modified should have 1 call");
+
+    // The remaining call should be the second original call
+    assertEq(
+      modifiedCalls[0].length, originalCalls[1].length, "Remaining call should match second original call length"
+    );
+    assertEq(
+      keccak256(modifiedCalls[0]), keccak256(originalCalls[1]), "Remaining call should match second original call"
+    );
+
+    // Verify both have the multicall selector
+    bytes4 originalSelector;
+    bytes4 modifiedSelector;
+    assembly {
+      originalSelector := mload(add(originalMulticall, 0x20))
+      modifiedSelector := mload(add(modifiedMulticall, 0x20))
+    }
+    assertEq(originalSelector, IMulticallable.multicall.selector, "Original should have multicall selector");
+    assertEq(modifiedSelector, IMulticallable.multicall.selector, "Modified should have multicall selector");
+  }
+
+  function test_removeReservedHatFromMulticall_RevertsOnEmpty() public {
+    bytes memory emptyMulticall = abi.encodeWithSelector(IMulticallable.multicall.selector, new bytes[](0));
+
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    proposalHatter.removeReservedHatFromMulticall(emptyMulticall);
+  }
+
+  function test_removeReservedHatFromMulticall_RevertsOnNonCreateHat() public {
+    // Build a multicall with a different function (e.g., just random bytes)
+    bytes[] memory calls = new bytes[](1);
+    calls[0] = hex"12345678"; // Wrong selector
+
+    bytes memory multicall = abi.encodeWithSelector(IMulticallable.multicall.selector, calls);
+
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    proposalHatter.removeReservedHatFromMulticall(multicall);
+  }
+
+  function test_removeReservedHatFromMulticall_RevertsOnTooShortFirstCall() public {
+    bytes[] memory calls = new bytes[](1);
+    calls[0] = hex"1234";
+
+    bytes memory multicall = abi.encodeWithSelector(IMulticallable.multicall.selector, calls);
+
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    proposalHatter.removeReservedHatFromMulticall(multicall);
+  }
+
+  function test_removeReservedHatFromMulticall_RevertsOnMalformedData() public {
+    bytes memory malformed = hex"1234";
+
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    proposalHatter.removeReservedHatFromMulticall(malformed);
+  }
+
+  function test_removeReservedHatFromMulticall_RevertsOnWrongSelector() public {
+    // Use wrong function selector (not multicall)
+    bytes memory wrongSelector =
+      hex"1234567800000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000";
+
+    vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+    proposalHatter.removeReservedHatFromMulticall(wrongSelector);
   }
 }
