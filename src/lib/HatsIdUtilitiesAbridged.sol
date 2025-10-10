@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0
+// SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025 Haberdasher Labs
 //
 // This program is free software: you can redistribute it and/or modify
