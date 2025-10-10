@@ -562,6 +562,45 @@ contract ForkTestBase is Test {
     assertEq(hats.getHatLevel(hatId), hats.getHatLevel(expectedAdmin) + 1, "Hat should be child of admin");
   }
 
+  /// @dev Comprehensive helper to assert that a hat was created correctly with custom parameters
+  /// @param hatId The hat ID to check
+  /// @param expectedAdmin The expected admin hat ID
+  /// @param expectedDetails The expected details string
+  /// @param expectedMaxSupply The expected max supply
+  /// @param expectedEligibility The expected eligibility module
+  /// @param expectedToggle The expected toggle module
+  /// @param expectedMutable Whether the hat should be mutable
+  /// @param expectedActive Whether the hat should be active
+  function _assertHatCreated(
+    uint256 hatId,
+    uint256 expectedAdmin,
+    string memory expectedDetails,
+    uint32 expectedMaxSupply,
+    address expectedEligibility,
+    address expectedToggle,
+    bool expectedMutable,
+    bool expectedActive
+  ) internal view {
+    // Verify hat properties in scoped blocks to avoid stack-too-deep
+    {
+      (string memory details, uint32 maxSupply, uint32 supply,,,,,,) = hats.viewHat(hatId);
+      assertEq(details, expectedDetails, "Hat details mismatch");
+      assertEq(maxSupply, expectedMaxSupply, "Max supply mismatch");
+      assertEq(supply, 0, "Supply should be 0 (not minted yet)");
+    }
+
+    {
+      (,,, address eligibility, address toggle,,, bool mutable_, bool active) = hats.viewHat(hatId);
+      assertEq(eligibility, expectedEligibility, "Eligibility mismatch");
+      assertEq(toggle, expectedToggle, "Toggle mismatch");
+      assertEq(mutable_, expectedMutable, "Mutable flag mismatch");
+      assertEq(active, expectedActive, "Active flag mismatch");
+    }
+
+    // Verify it's a child of the expected admin
+    assertEq(hats.getHatLevel(hatId), hats.getHatLevel(expectedAdmin) + 1, "Hat should be child of admin");
+  }
+
   /// @dev Helper to assert that a hat was toggled correctly
   /// @param hatId The hat ID to check
   /// @param toggle The expected toggle module
