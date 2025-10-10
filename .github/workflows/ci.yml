@@ -8,6 +8,7 @@ on:
 env:
   FOUNDRY_PROFILE: ci
   INFURA_KEY: ${{ secrets.INFURA_KEY }}
+  QUICKNODE_MAINNET_RPC: ${{ secrets.QUICKNODE_MAINNET_RPC }}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
