@@ -9,6 +9,10 @@ env:
   FOUNDRY_PROFILE: ci
   INFURA_KEY: ${{ secrets.INFURA_KEY }}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # lint-markdown:
   #   name: "Markdown Linting"
@@ -33,6 +37,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Check Solidity formatting
         run: forge fmt --check
@@ -52,6 +57,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore cached build
         uses: actions/cache/restore@v4
@@ -89,6 +95,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore build cache
         uses: actions/cache/restore@v4
@@ -100,8 +107,23 @@ jobs:
           restore-keys: |
             foundry-build-
 
+      - name: Restore RPC cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000
+          restore-keys: |
+            rpc-cache-
+
       - name: Run unit tests
         run: forge test --match-path "test/unit/**/*.sol" -vvv
+
+      - name: Save RPC cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000-${{ github.run_id }}
 
   test-integration:
     name: "Integration Tests"
@@ -116,6 +138,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore build cache
         uses: actions/cache/restore@v4
@@ -127,13 +150,29 @@ jobs:
           restore-keys: |
             foundry-build-
 
+      - name: Restore RPC cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000
+          restore-keys: |
+            rpc-cache-
+
       - name: Run integration tests
         run: forge test --match-path "test/integration/**/*.sol" -vvv
+
+      - name: Save RPC cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000-${{ github.run_id }}
 
   test-invariant:
     name: "Invariant Tests"
     runs-on: ubuntu-latest
     needs: build
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,6 +182,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore build cache
         uses: actions/cache/restore@v4
@@ -154,8 +194,23 @@ jobs:
           restore-keys: |
             foundry-build-
 
+      - name: Restore RPC cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000
+          restore-keys: |
+            rpc-cache-
+
       - name: Run invariant tests
         run: forge test --match-path "test/invariant/**/*.sol" -vvv
+
+      - name: Save RPC cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000-${{ github.run_id }}
 
   test-attacks:
     name: "Attack Vector Tests"
@@ -170,6 +225,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore build cache
         uses: actions/cache/restore@v4
@@ -181,8 +237,23 @@ jobs:
           restore-keys: |
             foundry-build-
 
+      - name: Restore RPC cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000
+          restore-keys: |
+            rpc-cache-
+
       - name: Run attack tests
         run: forge test --match-path "test/attacks/**/*.sol" -vvv
+
+      - name: Save RPC cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000-${{ github.run_id }}
 
   snapshot:
     name: "Gas Snapshot Check"
@@ -197,6 +268,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore build cache
         uses: actions/cache/restore@v4
@@ -229,6 +301,7 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+          cache: true
 
       - name: Restore build cache
         uses: actions/cache/restore@v4
@@ -240,8 +313,27 @@ jobs:
           restore-keys: |
             foundry-build-
 
+      - name: Restore RPC cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000
+          restore-keys: |
+            rpc-cache-
+
       - name: Run coverage
-        run: forge coverage --report summary --report lcov
+        run: |
+          forge coverage \
+            --no-match-path "test/invariant/**/*.sol" \
+            --report summary \
+            --report lcov
+
+      - name: Save RPC cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/.foundry/cache/rpc
+          key: rpc-cache-23000000-${{ github.run_id }}
 
       - name: Install lcov
         run: sudo apt-get update && sudo apt-get install -y lcov
