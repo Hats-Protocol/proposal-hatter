@@ -185,8 +185,15 @@ contract View_Tests is ForkTestBase {
     assertEq(id1, id2, "Fuzzed parameters should produce deterministic IDs");
 
     // Compute with slightly different salt (uniqueness check)
+    // Handle overflow case when salt is max uint256
+    bytes32 differentSalt;
+    if (salt == bytes32(type(uint256).max)) {
+      differentSalt = bytes32(0);
+    } else {
+      differentSalt = bytes32(uint256(salt) + 1);
+    }
     bytes32 id3 = proposalHatter.computeProposalId(
-      proposer, fundingAmount, ETH, timelockSec, primarySafe, recipientHatId, "", bytes32(uint256(salt) + 1)
+      proposer, fundingAmount, ETH, timelockSec, primarySafe, recipientHatId, "", differentSalt
     );
 
     // Should be different (changing any param changes ID)
