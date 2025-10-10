@@ -12,8 +12,19 @@ import { IProposalHatterTypes } from "../../src/interfaces/IProposalHatter.sol";
 contract Invariant_Test is ForkTestBase {
   ProposalHatterHandler internal handler;
 
+  /// @dev Snapshot of fork state after initial setup to avoid expensive re-setup
+  uint256 private setupSnapshot;
+
   function setUp() public override {
-    super.setUp();
+    if (setupSnapshot == 0) {
+      // First run: perform full fork setup (expensive)
+      super.setUp();
+      // Cache the initialized state
+      setupSnapshot = vm.snapshotState();
+    } else {
+      // Subsequent runs: revert to cached state (fast)
+      vm.revertToState(setupSnapshot);
+    }
 
     // Deploy and configure handler with all required parameters
     handler = new ProposalHatterHandler(

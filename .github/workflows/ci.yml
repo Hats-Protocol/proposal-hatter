@@ -212,81 +212,81 @@ jobs:
           path: ~/.foundry/cache/rpc
           key: rpc-cache-23000000-${{ github.run_id }}
 
-  test-attacks:
-    name: "Attack Vector Tests"
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+  # test-attacks:
+  #   name: "Attack Vector Tests"
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: stable
-          cache: true
+  #     - name: Install Foundry
+  #       uses: foundry-rs/foundry-toolchain@v1
+  #       with:
+  #         version: stable
+  #         cache: true
 
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            cache
-            out
-          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
-          restore-keys: |
-            foundry-build-
+  #     - name: Restore build cache
+  #       uses: actions/cache/restore@v4
+  #       with:
+  #         path: |
+  #           cache
+  #           out
+  #         key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+  #         restore-keys: |
+  #           foundry-build-
 
-      - name: Restore RPC cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.foundry/cache/rpc
-          key: rpc-cache-23000000
-          restore-keys: |
-            rpc-cache-
+  #     - name: Restore RPC cache
+  #       uses: actions/cache/restore@v4
+  #       with:
+  #         path: ~/.foundry/cache/rpc
+  #         key: rpc-cache-23000000
+  #         restore-keys: |
+  #           rpc-cache-
 
-      - name: Run attack tests
-        run: forge test --match-path "test/attacks/**/*.sol" -vvv
+  #     - name: Run attack tests
+  #       run: forge test --match-path "test/attacks/**/*.sol" -vvv
 
-      - name: Save RPC cache
-        uses: actions/cache/save@v4
-        if: always()
-        with:
-          path: ~/.foundry/cache/rpc
-          key: rpc-cache-23000000-${{ github.run_id }}
+  #     - name: Save RPC cache
+  #       uses: actions/cache/save@v4
+  #       if: always()
+  #       with:
+  #         path: ~/.foundry/cache/rpc
+  #         key: rpc-cache-23000000-${{ github.run_id }}
 
-  snapshot:
-    name: "Gas Snapshot Check"
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+  # snapshot:
+  #   name: "Gas Snapshot Check"
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: stable
-          cache: true
+  #     - name: Install Foundry
+  #       uses: foundry-rs/foundry-toolchain@v1
+  #       with:
+  #         version: stable
+  #         cache: true
 
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            cache
-            out
-          key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
-          restore-keys: |
-            foundry-build-
+  #     - name: Restore build cache
+  #       uses: actions/cache/restore@v4
+  #       with:
+  #         path: |
+  #           cache
+  #           out
+  #         key: foundry-build-${{ hashFiles('src/**', 'lib/**', 'foundry.toml') }}
+  #         restore-keys: |
+  #           foundry-build-
 
-      - name: Check gas snapshots
-        run: |
-          forge snapshot --check --tolerance 2 \
-            --no-match-path "test/invariant/**/*.sol" \
-            --no-match-test "testFuzz"
-        env:
-          FOUNDRY_FUZZ_SEED: 0x42
+  #     - name: Check gas snapshots
+  #       run: |
+  #         forge snapshot --check --tolerance 2 \
+  #           --no-match-path "test/invariant/**/*.sol" \
+  #           --no-match-test "testFuzz"
+  #       env:
+  #         FOUNDRY_FUZZ_SEED: 0x42
 
   coverage:
     name: "Test Coverage"

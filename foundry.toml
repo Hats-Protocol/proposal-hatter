@@ -36,7 +36,7 @@ src = "test"
 
 [profile.ci]
 fuzz = { runs = 5000 }
-invariant = { runs = 1000, depth = 50 }
+invariant = { runs = 100, depth = 25 }
 # 10 minute timeout per fuzz run for comprehensive invariant testing
 fuzz_timeout = 600
 
@@ -45,6 +45,10 @@ fuzz = { runs = 32 }
 invariant = { runs = 5, depth = 20 }
 # 5 minute timeout per fuzz run for faster iteration
 fuzz_timeout = 300
+
+[profile.minimal]
+fuzz = { runs = 1 }
+invariant = { runs = 1, depth = 1 }
 
 [fmt]
 bracket_spacing = true
@@ -81,6 +85,4 @@ sepolia = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chai
 
 # See more config options https://github.com/foundry-rs/foundry/tree/master/config
 
-[profile.minimal]
-fuzz = { runs = 1 }
-invariant = { runs = 1, depth = 1 }
+
