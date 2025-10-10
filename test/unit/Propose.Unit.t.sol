@@ -278,6 +278,9 @@ contract Propose_Tests is ForkTestBase {
   }
 
   function testFuzz_ProposeRolesOnly_RevertIf_MulticallWrongSelector(bytes4 selector) public {
+    // Ensure the selector is not the valid multicall selector
+    vm.assume(selector != IMulticallable.multicall.selector);
+    
     // Build an invalid hats multicall that doesn't match the multicall selector
     bytes memory hatsMulticall = abi.encodeWithSelector(selector, new bytes[](1));
 
