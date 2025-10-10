@@ -20,6 +20,12 @@
       "rev": "1981fbc63e3850d626074d81d22a198afe64ac03"
     }
   },
+  "lib/safe-smart-account": {
+    "tag": {
+      "name": "v1.4.1",
+      "rev": "bf943f80fec5ac647159d26161446ac5d716a294"
+    }
+  },
   "lib/solady": {
     "tag": {
       "name": "v0.1.26",

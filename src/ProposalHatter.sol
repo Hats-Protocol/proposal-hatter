@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.30;
 
 import { IHats } from "../lib/hats-protocol/src/Interfaces/IHats.sol";
@@ -56,10 +56,15 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   uint256 internal constant PUBLIC_SENTINEL = 1; // never a valid Hats ID
   // Sentinel non-zero address for Hats modules (eligibility/toggle)
   address internal constant EMPTY_SENTINEL = address(1);
+  // keccak256("Proposed(bytes32,bytes32,address,uint256,address,uint32,address,uint256,uint256,uint256,bytes32)")
+  bytes32 private constant _PROPOSED_EVENT_SIGNATURE =
+    0xf6d1b6d79196970a10149b547ab0f6c675ce1d689f3afc40834aea929244437d;
 
   // --------------------
   // Storage
   // --------------------
+
+  string public constant VERSION = "test2";
 
   /// @inheritdoc IProposalHatter
   address public immutable HATS_PROTOCOL_ADDRESS;
@@ -161,12 +166,15 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Only callable by the Proposer
     _checkAuth(proposerHat);
 
+    // Ensure the hatsMulticall is valid, and get the multicall hash if so
+    bytes32 hatsMulticallHash = _checkMulticall(hatsMulticall);
+
     // Get the Safe address
     address safe_ = safe;
 
     // Compute the proposal ID
     proposalId = _computeProposalId(
-      msg.sender, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticall, salt
+      msg.sender, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticallHash, salt
     );
 
     // New proposals must be unique
@@ -197,20 +205,41 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       hatsMulticall: hatsMulticall
     });
 
-    // Log the proposal
-    emit IProposalHatterEvents.Proposed(
-      proposalId,
-      EfficientHashLib.hash(hatsMulticall),
-      msg.sender,
-      fundingAmount_,
-      fundingToken_,
-      timelockSec_,
-      safe_,
-      recipientHatId_,
-      approverHatId_,
-      reservedHatId_,
-      salt
-    );
+    // Equivalent to:
+    // emit IProposalHatterEvents.Proposed(
+    //   proposalId,
+    //   EfficientHashLib.hash(hatsMulticall),
+    //   msg.sender,
+    //   fundingAmount_,
+    //   fundingToken_,
+    //   timelockSec_,
+    //   safe_,
+    //   recipientHatId_,
+    //   approverHatId_,
+    //   reservedHatId_,
+    //   salt
+    // );
+
+    assembly {
+      let dataPtr := mload(0x40)
+      mstore(dataPtr, fundingAmount_)
+      mstore(add(dataPtr, 0x20), and(fundingToken_, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))
+      mstore(add(dataPtr, 0x40), timelockSec_)
+      mstore(add(dataPtr, 0x60), and(safe_, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF))
+      mstore(add(dataPtr, 0x80), recipientHatId_)
+      mstore(add(dataPtr, 0xa0), approverHatId_)
+      mstore(add(dataPtr, 0xc0), reservedHatId_)
+      mstore(add(dataPtr, 0xe0), salt)
+      mstore(0x40, add(dataPtr, 0x100))
+      log4(
+        dataPtr,
+        0x100,
+        _PROPOSED_EVENT_SIGNATURE,
+        proposalId,
+        hatsMulticallHash,
+        and(caller(), 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF)
+      )
+    }
   }
 
   /// @inheritdoc IProposalHatter
@@ -223,6 +252,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
     // Only active proposals can be approved
     if (p.state != IProposalHatterTypes.ProposalState.Active) revert IProposalHatterErrors.InvalidState(p.state);
+
     // Must wear per-proposal approver hat
     if (!IHats(HATS_PROTOCOL_ADDRESS).isWearerOfHat(msg.sender, p.approverHatId)) {
       revert IProposalHatterErrors.NotAuthorized();
@@ -235,6 +265,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Advance the proposal state to Approved
     p.state = IProposalHatterTypes.ProposalState.Approved;
 
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
+
     // Log the approval
     emit IProposalHatterEvents.Approved(proposalId, msg.sender, eta);
   }
@@ -243,9 +276,6 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
   function execute(bytes32 proposalId) external nonReentrant {
     // Only callable when proposals are not paused
     _checkProposalsPaused();
-
-    // Only callable by the Executor (unless execution is public, ie is set to PUBLIC_SENTINEL)
-    _checkAuth(executorHat);
 
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
@@ -256,6 +286,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     if (p.state != IProposalHatterTypes.ProposalState.Approved) revert IProposalHatterErrors.InvalidState(p.state);
     if (uint64(block.timestamp) < p.eta) revert IProposalHatterErrors.TooEarly(p.eta, uint64(block.timestamp));
 
+    // Only callable by the Executor (unless execution is public, ie is set to PUBLIC_SENTINEL)
+    _checkAuth(executorHat);
+
     // Execute the proposal
     _execute(p, proposalId);
   }
@@ -265,26 +298,29 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Only callable when proposals are not paused
     _checkProposalsPaused();
 
-    // Only callable by Executor (unless execution is public) and Approver Ticket Hat wearer
-    _checkAuth(executorHat);
-
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
-
-    // Only callable by Approver Ticket Hat wearer
-    if (!IHats(HATS_PROTOCOL_ADDRESS).isWearerOfHat(msg.sender, p.approverHatId)) {
-      revert IProposalHatterErrors.NotAuthorized();
-    }
 
     // Proposals can only be approved and executed atomically...
     // - if they are Active
     // - when there is no timelock
     IProposalHatter.ProposalState state = p.state;
     if (state != IProposalHatterTypes.ProposalState.Active) revert IProposalHatterErrors.InvalidState(state);
-    if (p.timelockSec != 0) revert IProposalHatterErrors.InvalidState(state);
+    uint64 nowTs = uint64(block.timestamp);
+    uint32 timelockSec = p.timelockSec;
+    if (timelockSec != 0) revert IProposalHatterErrors.TooEarly(nowTs + timelockSec, nowTs);
+
+    // Only callable by Approver-Executor (unless execution is public, ie is set to PUBLIC_SENTINEL)
+    _checkAuth(executorHat);
+    if (!IHats(HATS_PROTOCOL_ADDRESS).isWearerOfHat(msg.sender, p.approverHatId)) {
+      revert IProposalHatterErrors.NotAuthorized();
+    }
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the approval
-    uint64 eta = uint64(block.timestamp);
+    uint64 eta = nowTs;
     p.eta = eta;
     emit IProposalHatterEvents.Approved(proposalId, msg.sender, eta);
 
@@ -295,9 +331,6 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
   /// @inheritdoc IProposalHatter
   function escalate(bytes32 proposalId) external {
-    // Only callable by the Escalator
-    _checkAuth(escalatorHat);
-
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
 
@@ -307,8 +340,14 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       revert IProposalHatterErrors.InvalidState(p.state);
     }
 
+    // Only callable by the Escalator
+    _checkAuth(escalatorHat);
+
     // Set the proposal state to Escalated
     p.state = IProposalHatterTypes.ProposalState.Escalated;
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the escalation
     emit IProposalHatterEvents.Escalated(proposalId, msg.sender);
@@ -319,17 +358,20 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
 
-    // Only callable by Approver Ticket Hat wearer
-    _checkAuth(p.approverHatId);
-
     // Proposals can only be rejected when Active
     if (p.state != IProposalHatterTypes.ProposalState.Active) revert IProposalHatterErrors.InvalidState(p.state);
+
+    // Only callable by Approver Ticket Hat wearer
+    _checkAuth(p.approverHatId);
 
     // Set the proposal state to Rejected
     p.state = IProposalHatterTypes.ProposalState.Rejected;
 
     // If it exists, toggle off the reserved hat to clean up
-    if (p.reservedHatId != 0) _toggleOffReservedHat(p.reservedHatId);
+    if (p.reservedHatId != 0) _toggleOffHat(p.reservedHatId);
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the rejection
     emit IProposalHatterEvents.Rejected(proposalId, msg.sender);
@@ -340,20 +382,23 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     // Get the proposal storage pointer
     IProposalHatter.ProposalData storage p = proposals[proposalId];
 
-    // Only callable by the original submitter
-    if (msg.sender != p.submitter) revert IProposalHatterErrors.NotAuthorized();
-
     // Proposals can only be canceled when Active or Approved
     if (p.state != IProposalHatterTypes.ProposalState.Active && p.state != IProposalHatterTypes.ProposalState.Approved)
     {
       revert IProposalHatterErrors.InvalidState(p.state);
     }
 
+    // Only callable by the original submitter
+    if (msg.sender != p.submitter) revert IProposalHatterErrors.NotAuthorized();
+
     // Set the proposal state to Canceled
     p.state = IProposalHatterTypes.ProposalState.Canceled;
 
     // If it exists, toggle off the reserved hat to clean up
-    if (p.reservedHatId != 0) _toggleOffReservedHat(p.reservedHatId);
+    if (p.reservedHatId != 0) _toggleOffHat(p.reservedHatId);
+
+    // Toggle off the approver hat as the approver's job is finished
+    _toggleOffHat(p.approverHatId);
 
     // Log the cancellation
     emit IProposalHatterEvents.Canceled(proposalId, msg.sender);
@@ -487,14 +532,56 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     bytes calldata hatsMulticall,
     bytes32 salt
   ) external view returns (bytes32) {
+    // Get the hash of the hats multicall if valid, or revert if invalid
+    bytes32 hatsMulticallHash = _checkMulticall(hatsMulticall);
+
+    // Compute the proposal ID using the multicall hash
     return _computeProposalId(
-      submitter_, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticall, salt
+      submitter_, fundingAmount_, fundingToken_, timelockSec_, safe_, recipientHatId_, hatsMulticallHash, salt
     );
   }
 
   /// @inheritdoc IProposalHatter
   function getProposalState(bytes32 proposalId) external view returns (IProposalHatterTypes.ProposalState) {
     return proposals[proposalId].state;
+  }
+
+  /// @inheritdoc IProposalHatter
+  function decodeMulticallPayload(bytes calldata rawBytes) external pure returns (bytes[] memory) {
+    return abi.decode(rawBytes, (bytes[]));
+  }
+
+  /// @inheritdoc IProposalHatter
+  function removeReservedHatFromMulticall(bytes calldata hatsMulticall) external pure returns (bytes memory) {
+    // Check minimum length for multicall(bytes[]) call (4 bytes selector + 32 bytes offset)
+    if (hatsMulticall.length < 36) revert InvalidMulticall();
+
+    // Verify the function selector is multicall
+    if (!_hasSelectorCalldata(hatsMulticall, IMulticallable.multicall.selector)) revert InvalidMulticall();
+
+    // Decode the parameters (skip the 4-byte selector)
+    bytes[] memory calls = abi.decode(hatsMulticall[4:], (bytes[]));
+
+    // Require at least one call
+    if (calls.length == 0) revert InvalidMulticall();
+
+    // Check that the first call is createHat
+    bytes memory firstCall = calls[0];
+    if (firstCall.length < 4) revert InvalidMulticall();
+    bytes4 firstSelector;
+    assembly {
+      firstSelector := mload(add(firstCall, 0x20))
+    }
+    if (firstSelector != IHats.createHat.selector) revert InvalidMulticall();
+
+    // Create new array without the first element
+    bytes[] memory newCalls = new bytes[](calls.length - 1);
+    for (uint256 i = 1; i < calls.length; i++) {
+      newCalls[i - 1] = calls[i];
+    }
+
+    // Re-encode as full multicall calldata (selector + parameters)
+    return abi.encodeWithSelector(IMulticallable.multicall.selector, newCalls);
   }
 
   // --------------------
@@ -523,12 +610,12 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
   /// @dev Internal helper to compute the deterministic proposalId for the current caller.
   /// @param submitter_ The address that proposed.
-  /// @param hatsMulticall ABI-encoded bytes[] for IMulticallable.multicall.
   /// @param fundingAmount_ Funding amount to approve on execute.
   /// @param fundingToken_ Token address (address(0) for ETH).
   /// @param timelockSec_ Per-proposal delay in seconds.
   /// @param safe_ The Safe for which this allowance is valid.
   /// @param recipientHatId_ Recipient hat ID.
+  /// @param hatsMulticallHash The hash of the hats multicall.
   /// @param salt Optional salt for de-duplication.
   function _computeProposalId(
     address submitter_,
@@ -537,12 +624,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     uint32 timelockSec_,
     address safe_,
     uint256 recipientHatId_,
-    bytes calldata hatsMulticall,
+    bytes32 hatsMulticallHash,
     bytes32 salt
   ) internal view returns (bytes32) {
-    // Pre-hash the dynamic bytes
-    bytes32 multicallHash = EfficientHashLib.hash(hatsMulticall);
-
     // Hash the static tuple with Solady
     return EfficientHashLib.hash(
       bytes32(block.chainid),
@@ -554,7 +638,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       bytes32(uint256(timelockSec_)),
       bytes32(uint256(uint160(safe_))),
       bytes32(recipientHatId_),
-      multicallHash,
+      hatsMulticallHash,
       salt
     );
   }
@@ -573,12 +657,9 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     if (IHats(HATS_PROTOCOL_ADDRESS).getNextId(admin) != reservedHatId_) revert InvalidReservedHatId();
 
     // Create the reserved hat
-    uint256 returnedHatId = IHats(HATS_PROTOCOL_ADDRESS).createHat(
+    IHats(HATS_PROTOCOL_ADDRESS).createHat(
       admin, Strings.toHexString(uint256(proposalId), 32), 1, EMPTY_SENTINEL, EMPTY_SENTINEL, true, ""
     );
-
-    // Sanity check: ensure the returned hat id matches the input
-    if (reservedHatId_ != returnedHatId) revert InvalidReservedHatId();
   }
 
   /// @dev Internal helper to execute a proposal. Updates the allowance ledger and executes the Hats Protocol multicall.
@@ -604,10 +685,11 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       // Delete the hats multicall from storage for some gas savings
       delete p.hatsMulticall;
 
-      // Decode stored bytes into bytes[] expected by Multicallable
-      bytes[] memory calls = abi.decode(hatsMulticall, (bytes[]));
-      // Execute the multicall. If Hats reverts, the entire tx reverts (atomicity)
-      IMulticallable(HATS_PROTOCOL_ADDRESS).multicall(calls);
+      // Execute the multicall as a low level call.
+      // In {propose}, we required that hatsMulticall encodes an IMulticallable.multicall(bytes[]) call.
+      // If Hats reverts, the entire tx reverts (atomicity)
+      (bool success, bytes memory ret) = HATS_PROTOCOL_ADDRESS.call(hatsMulticall);
+      if (!success) revert IProposalHatterErrors.HatsMulticallFailed(ret);
     }
 
     // Log the execution with the new allowance
@@ -616,14 +698,16 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
     );
   }
 
-  /// @dev Internal helper to toggle off a reserved hat to clean up after its proposal is rejected or canceled
-  /// @param reservedHatId The id of the reserved hat to toggle off
-  function _toggleOffReservedHat(uint256 reservedHatId) internal {
+  /// @dev Internal helper to toggle off a hat
+  /// Useful for toggling off approver hats after a proposal is approved, rejected, or canceled; and reserved hats after
+  /// a proposal is rejected or canceled
+  /// @param hatId The id of the hat to toggle off
+  function _toggleOffHat(uint256 hatId) internal {
     // Set this contract as the toggle module
-    IHats(HATS_PROTOCOL_ADDRESS).changeHatToggle(reservedHatId, address(this));
+    IHats(HATS_PROTOCOL_ADDRESS).changeHatToggle(hatId, address(this));
 
     // Set the hat status to false
-    IHats(HATS_PROTOCOL_ADDRESS).setHatStatus(reservedHatId, false);
+    IHats(HATS_PROTOCOL_ADDRESS).setHatStatus(hatId, false);
   }
 
   /// @dev Internal helper to execute an ETH or ERC20 transfer from the Safe to the caller. This contract must be an
@@ -651,6 +735,7 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
 
     // Try the Safe module call, reverting if it fails, following the OpenZeppelin SafeERC20 library patterns for ERC20
     // transfers.
+    // If ProposalHatter is not enabled as a module on the Safe, the Safe will revert the tx with string "GS104"
     (bool success, bytes memory ret) =
       ModuleManager(safe_).execTransactionFromModuleReturnData(to, value, data, Enum.Operation.Call);
     if (!success) revert IProposalHatterErrors.SafeExecutionFailed(ret);
@@ -659,5 +744,61 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       if (ret.length != 32) revert IProposalHatterErrors.ERC20TransferMalformedReturn(token, ret);
       if (abi.decode(ret, (bool)) != true) revert IProposalHatterErrors.ERC20TransferReturnedFalse(token, ret);
     }
+  }
+
+  /// @dev Internal helper to check if the hatsMulticall is valid, get the multicall hash if so, or revert if invalid
+  /// Valid multicalls are either:
+  /// - empty, or
+  /// - begin with the IMulticallable.multicall(bytes[]) function selector *and* ABI-decode to a bytes[] array
+  /// @param hatsMulticall The hats multicall to check
+  /// @return multicallHash The multicall hash if the hatsMulticall is valid, otherwise bytes32(0)
+  function _checkMulticall(bytes calldata hatsMulticall) internal view returns (bytes32) {
+    // Empty multicall is valid
+    if (hatsMulticall.length == 0) return bytes32(0);
+
+    // Must be at least 4 bytes for selector
+    if (hatsMulticall.length < 4) revert IProposalHatterErrors.InvalidMulticall();
+
+    // Check selector matches multicall(bytes[])
+    if (!_hasSelectorCalldata(hatsMulticall, IMulticallable.multicall.selector)) {
+      revert IProposalHatterErrors.InvalidMulticall();
+    }
+
+    // Additional validation: ensure the payload is properly ABI-encoded as bytes[]
+    bytes calldata payload = hatsMulticall[4:];
+
+    // For a bytes[] array, the ABI encoding should start with 0x20 (32-byte offset)
+    if (payload.length < 32) revert IProposalHatterErrors.InvalidMulticall();
+
+    // Check that the first 32 bytes is the offset (should be 0x20 for a bytes[] array)
+    uint256 offset;
+    assembly {
+      offset := calldataload(payload.offset)
+    }
+    if (offset != 0x20) revert IProposalHatterErrors.InvalidMulticall();
+
+    // Validate the payload is decodable as bytes[]
+    try this.decodeMulticallPayload(payload) returns (bytes[] memory) {
+      return EfficientHashLib.hash(hatsMulticall);
+    } catch {
+      revert IProposalHatterErrors.InvalidMulticall();
+    }
+  }
+
+  /// @dev Check if data has the expected function selector.
+  /// @param data The data to check (assumes >= 4 bytes), passed as calldata.
+  /// @param selector The expected 4-byte function selector.
+  /// @return True if the first 4 bytes of data match the selector.
+  function _hasSelectorCalldata(bytes calldata data, bytes4 selector) internal pure returns (bool) {
+    bytes4 actualSelector;
+    assembly {
+      // data.offset gives us the byte position in calldata where this slice starts.
+      // For a top-level function parameter, this is typically 0x04 (after the function selector).
+      // For nested calldata slices, it points to wherever that slice begins in the original calldata.
+      // calldataload(offset) reads 32 bytes from calldata starting at the given offset.
+      // Since we only need the first 4 bytes for the selector, the remaining 28 bytes are ignored.
+      actualSelector := calldataload(data.offset)
+    }
+    return actualSelector == selector;
   }
 }

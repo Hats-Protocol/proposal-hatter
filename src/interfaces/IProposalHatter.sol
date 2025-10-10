@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity ^0.8.30;
 
 /// @title IProposalHatterTypes
@@ -46,10 +46,12 @@ interface IProposalHatterErrors is IProposalHatterTypes {
   error AllowanceExceeded(uint256 remaining, uint256 requested);
   error AlreadyUsed(bytes32 proposalId);
   error ZeroAddress();
+  error InvalidMulticall();
   error InvalidReservedHatId();
   error InvalidReservedHatBranch();
   error ProposalsArePaused();
   error WithdrawalsArePaused();
+  error HatsMulticallFailed(bytes returnData);
   error SafeExecutionFailed(bytes returnData);
   error ERC20TransferReturnedFalse(address token, bytes returnData);
   error ERC20TransferMalformedReturn(address token, bytes returnData);
@@ -184,7 +186,8 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
   /// @return remaining Remaining allowance amount.
   function allowanceOf(address safe, uint256 hatId, address token) external view returns (uint88 remaining);
 
-  /// @notice Compute proposalId for given inputs (for pre-call checks/UI display).
+  /// @notice Compute proposalId for given inputs (for pre-call checks/UI display). Reverts if the hatsMulticall is
+  /// invalid.
   /// @dev Includes `msg.sender` in the hash to prevent front-running by other submitters.
   /// @param submitter The address that proposed.
   /// @param fundingAmount Funding amount to be added on execution.
@@ -205,6 +208,20 @@ interface IProposalHatter is IProposalHatterEvents, IProposalHatterErrors {
     bytes calldata hatsMulticall,
     bytes32 salt
   ) external view returns (bytes32);
+
+  /// @notice Helper function to decode a multicall from raw bytes.
+  /// @dev Useful for try-catch validation of multicall payloads.
+  /// @param rawBytes The raw bytes to decode.
+  /// @return decoded The decoded bytes.
+  function decodeMulticallPayload(bytes calldata rawBytes) external pure returns (bytes[] memory);
+
+  /// @notice Remove the first createHat call from a Hats multicall payload.
+  /// @dev Useful when using reservedHatId - the first hat creation is handled by ProposalHatter,
+  ///      so it must be removed from the multicall exported from the Hats Protocol frontend.
+  ///      Reverts with InvalidMulticall if the payload is malformed or the first call is not createHat.
+  /// @param hatsMulticall Full calldata for `IMulticallable.multicall` including the function selector.
+  /// @return modified The modified multicall with the first createHat call removed (including selector).
+  function removeReservedHatFromMulticall(bytes calldata hatsMulticall) external pure returns (bytes memory);
 
   // ---- Storage getters ----
   /// @notice Proposal data by id.

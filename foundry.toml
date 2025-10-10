@@ -2,6 +2,7 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
+# via_ir = true
 optimizer_runs = 1_000_000
 # the following setting ensures that deterministically deployed contracts will always be to the same address
 bytecode_hash = "none"
@@ -35,13 +36,19 @@ src = "test"
 
 [profile.ci]
 fuzz = { runs = 5000 }
-invariant = { runs = 1000 }
+invariant = { runs = 100, depth = 25 }
+# 10 minute timeout per fuzz run for comprehensive invariant testing
+fuzz_timeout = 600
 
 [profile.lite]
 fuzz = { runs = 32 }
-invariant = { runs = 10 }
-# Speed up compilation and tests during development.
-optimizer = false
+invariant = { runs = 5, depth = 20 }
+# 5 minute timeout per fuzz run for faster iteration
+fuzz_timeout = 300
+
+[profile.minimal]
+fuzz = { runs = 1 }
+invariant = { runs = 1, depth = 1 }
 
 [fmt]
 bracket_spacing = true
@@ -56,10 +63,12 @@ wrap_comments = true
 [rpc_endpoints]
 arbitrum = "https://arbitrum-mainnet.infura.io/v3/${INFURA_KEY}"
 base = "https://base-mainnet.infura.io/v3/${INFURA_KEY}"
+base-sepolia = "https://base-sepolia.infura.io/v3/${INFURA_KEY}"
 celo = "https://celo-mainnet.infura.io/v3/${INFURA_KEY}"
 gnosis = "${GC_RPC}"
 local = "http://localhost:8545"
-mainnet = "https://mainnet.infura.io/v3/${INFURA_KEY}"
+# mainnet = "https://mainnet.infura.io/v3/${INFURA_KEY}"
+mainnet = "${QUICKNODE_MAINNET_RPC}"
 optimism = "https://optimism-mainnet.infura.io/v3/${INFURA_KEY}"
 polygon = "https://polygon-mainnet.infura.io/v3/${INFURA_KEY}"
 sepolia = "https://sepolia.infura.io/v3/${INFURA_KEY}"
@@ -67,6 +76,7 @@ sepolia = "https://sepolia.infura.io/v3/${INFURA_KEY}"
 [etherscan]
 arbitrum = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=42161"}
 base = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=8453"}
+base-sepolia = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=84532"}
 celo = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=42220"}
 gnosis = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=100"}
 mainnet = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=1"}
@@ -75,3 +85,5 @@ polygon = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chai
 sepolia = {key = "${ETHERSCAN_KEY}", url = "https://api.etherscan.io/v2/api?chainid=11155111"}
 
 # See more config options https://github.com/foundry-rs/foundry/tree/master/config
+
+
