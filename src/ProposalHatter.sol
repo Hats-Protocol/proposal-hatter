@@ -764,8 +764,21 @@ contract ProposalHatter is ReentrancyGuard, IProposalHatter, HatsIdUtilities {
       revert IProposalHatterErrors.InvalidMulticall();
     }
 
+    // Additional validation: ensure the payload is properly ABI-encoded as bytes[]
+    bytes calldata payload = hatsMulticall[4:];
+
+    // For a bytes[] array, the ABI encoding should start with 0x20 (32-byte offset)
+    if (payload.length < 32) revert IProposalHatterErrors.InvalidMulticall();
+
+    // Check that the first 32 bytes is the offset (should be 0x20 for a bytes[] array)
+    uint256 offset;
+    assembly {
+      offset := calldataload(payload.offset)
+    }
+    if (offset != 0x20) revert IProposalHatterErrors.InvalidMulticall();
+
     // Validate the payload is decodable as bytes[]
-    try this.decodeMulticallPayload(hatsMulticall[4:]) returns (bytes[] memory) {
+    try this.decodeMulticallPayload(payload) returns (bytes[] memory) {
       return EfficientHashLib.hash(hatsMulticall);
     } catch {
       revert IProposalHatterErrors.InvalidMulticall();

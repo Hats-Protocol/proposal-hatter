@@ -323,6 +323,37 @@ contract Propose_Tests is ForkTestBase {
     );
   }
 
+  function test_ProposeRolesOnly_RevertIf_MulticallInvalidPayload_InvalidBytes32Values() public {
+    // Test other bytes32 values that should also be rejected
+    bytes32[] memory invalidArgs = new bytes32[](4);
+    invalidArgs[0] = bytes32(0); // Empty bytes32
+    invalidArgs[1] = bytes32(uint256(1)); // Non-zero value
+    invalidArgs[2] = bytes32(uint256(0x20)); // Looks like ABI offset but isn't
+    invalidArgs[3] = bytes32(uint256(0x1234567890abcdef)); // Random value
+
+    for (uint256 i = 0; i < invalidArgs.length; i++) {
+      bytes memory hatsMulticall = abi.encodeWithSelector(IMulticallable.multicall.selector, invalidArgs[i]);
+
+      // Build expected proposal data with roles only (0 funding, arbitrary token)
+      IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
+        proposer, 0, ETH, 1 days, recipientHat, 0, hatsMulticall, IProposalHatterTypes.ProposalState.Active
+      );
+
+      // Attempt to propose with invalid hatsMulticall - should revert with InvalidMulticall
+      vm.expectRevert(IProposalHatterErrors.InvalidMulticall.selector);
+      vm.prank(proposer);
+      proposalHatter.propose(
+        expected.fundingAmount,
+        expected.fundingToken,
+        expected.timelockSec,
+        expected.recipientHatId,
+        expected.reservedHatId,
+        expected.hatsMulticall,
+        bytes32(uint256(1))
+      );
+    }
+  }
+
   function test_RevertIf_DuplicateProposal() public {
     // Build proposal data
     IProposalHatterTypes.ProposalData memory expected = _buildExpectedProposal(
