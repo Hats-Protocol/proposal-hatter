@@ -54,11 +54,11 @@ contract HatsIdUtilitiesAbridged {
     if (_hatId & uint256(type(uint16).max) == 0) return 13;
     return 14;
   }
+
   /// @notice Checks whether a hat is a topHat in its local hat tree
   /// @dev Similar to isTopHat, but does not account for linked trees
   /// @param _hatId The hat in question
   /// @return _isLocalTopHat Whether the hat is a topHat for its local tree
-
   function isLocalTopHat(uint256 _hatId) public pure returns (bool _isLocalTopHat) {
     _isLocalTopHat = _hatId > 0 && uint224(_hatId) == 0;
   }

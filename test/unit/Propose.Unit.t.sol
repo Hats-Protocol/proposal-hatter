@@ -457,6 +457,28 @@ contract Propose_Tests is ForkTestBase {
     );
   }
 
+  function test_RevertIf_InvalidReservedHatId_TopHat() public {
+    // Build proposal data with top hat as reserved hat ID (invalid - top hats cannot have admins)
+    IProposalHatterTypes.ProposalData memory expected =
+      _buildExpectedProposal(proposer, 1 ether, ETH, 1 days, recipientHat, topHatId, "", IProposalHatterTypes.ProposalState.Active);
+
+    bytes32 salt = bytes32(uint256(999));
+
+    // Attempt to create proposal with top hat as reserved hat
+    // This should revert because isLocalTopHat(topHatId) returns true in _getAdminHat
+    vm.expectRevert(IProposalHatterErrors.InvalidReservedHatId.selector);
+    vm.prank(proposer);
+    proposalHatter.propose(
+      expected.fundingAmount,
+      expected.fundingToken,
+      expected.timelockSec,
+      expected.recipientHatId,
+      topHatId, // Top hat - should trigger isLocalTopHat check and revert
+      expected.hatsMulticall,
+      salt
+    );
+  }
+
   function test_RevertIf_InvalidReservedHatBranch() public {
     // Create a hat outside of the OPS_BRANCH_ID tree (under approverBranchId instead)
     vm.prank(org);
