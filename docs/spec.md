@@ -1,12 +1,10 @@
 # ProposalHatter.sol — Functional Specification
 
-Status: Draft v1.7
+Status: Draft v1.8
 
-Date: 2025-10-06
+Date: 2025-10-11
 
 Author: Spencer
-
-Implementer: Codex
 
 Scope: Single contract (ProposalHatter.sol). No proxy/upgradability assumed unless noted.
 
@@ -518,12 +516,18 @@ Reentrancy
 
 ---
 
-## 12) Non‑goals (v1)
+## 12) Non‑goals (v0.1.0)
 
-- Policy tiers, Reality‑based challenges, per‑epoch program budgets, stream/drip schedules (can be layered later without changing the Safe wiring).
-- Auto‑provisioning Safe module limits from Proposal Hatter (module limits are owner‑set per Safe UX/API).
-- Interface abstraction/adapters for multiple module versions; upgrades will be handled by revoking Proposal Hatter’s hat and minting it to a new contract version, with any allowance data migration handled in that process.
-- Support for Hats trees that are linked or nested across multiple branches; this version assumes all relevant hats live within a single branch.
+This version optimizes for security, simplicity, and minimal front‑end implementation cost. The following features and optimizations are intentionally deferred to future versions:
+
+- **Off‑chain proposal storage**: All proposal properties are stored on‑chain. This increases the gas cost of submitting a proposal but eases front‑end indexing demands and simplifies UX for all other proposal lifecycle functions (`approve`, `reject`, `escalate`, and `cancel` each take only a single `proposalId` argument).
+- **Allowance decrement via proposals**: Funding allowances can only be increased by executed proposals and decreased by withdrawals. A recipient's outstanding allowance can be removed by revoking the recipient hat or minting it to a contract that adds additional withdrawal constraints.
+- **Hats details schema**: The `details` field of Approver hats and reserved hats are set to the related `proposalId` rather than wrapped in Hats details schema JSON.
+- **Arbitrary external calls**: Proposals are limited to Hats Protocol `multicall` operations and funding allocations. Arbitrary external calls are not supported.
+- **Policy tiers, Reality‑based challenges, per‑epoch program budgets, stream/drip schedules**: These governance patterns can be layered on top in future versions without changing the Safe wiring.
+- **Auto‑provisioning Safe module limits**: Module limits are owner‑set per Safe UX/API.
+- **Interface abstraction/adapters for multiple module versions**: Upgrades will be handled by revoking Proposal Hatter's hat and minting it to a new contract version, with any allowance data migration handled in that process.
+- **Support for Hats trees that are linked or nested across multiple branches**: This version assumes all relevant hats live within a single branch.
 
 ---
 
